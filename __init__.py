@@ -12,6 +12,10 @@ imposes on every game, independent of any particular title:
     tpl      TPL texture palettes
     u8       U8 archives
     dsp      DSP-ADPCM header and decoder
+    recomp   static recompilation of Gekko code to C++ (layer 4)
+
+wiikit/runtime/ holds the C++ side: ppc.h (the CPU model the generated code
+runs against), mem.cpp (guest memory, DOL loading), services_stub.cpp.
 
 Layers 1-3 are pure Python 3.8+ with no dependencies. Game-specific knowledge
 belongs in the game's own tools/, not here.
