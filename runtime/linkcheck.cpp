@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <cstddef>
 
-struct PPCFuncEntry { uint32_t addr; PPCFunc fn; };
 extern const PPCFuncEntry g_ppc_funcs[];
 extern const size_t g_ppc_nfuncs;
 

@@ -23,6 +23,8 @@ Disc  0x000 game id (6 chars), 0x018 Wii magic 0x5D1C9EA3, 0x020 title.
 Partition
       Starts with its ticket: the encrypted title key at 0x1BF, the title id
       at 0x1DC (IV = title id + 8 zero bytes), the common-key index at 0x1F1.
+      0x2A4 / 0x2A8: TMD size and offset (>> 2); the TMD names the IOS the
+      game runs on (u64 at 0x184).
       0x2B8 / 0x2BC: data offset and size (>> 2). The data area is a run of
       0x8000-byte clusters, each 0x400 bytes of hash tables followed by 0x7C00
       bytes of payload; the payload IV is bytes 0x3D0-0x3DF of the still
@@ -154,6 +156,9 @@ class Partition:
         self.title_key = aes.cbc_decrypt(ck, iv, t[0x1BF:0x1CF], pure)
         self.data_off = be32(t, 0x2B8) << 2
         self.data_size = be32(t, 0x2BC) << 2
+        self.ticket = t[:0x2A4]
+        disc.seek(offset + (be32(t, 0x2A8) << 2))
+        self.tmd = disc.read(be32(t, 0x2A4))
         self._idx, self._buf = -1, b""
 
     def _cluster(self, idx):
@@ -236,6 +241,7 @@ def extract(path, out, want="DATA", pure=False, log=print):
     os.makedirs(os.path.join(out, "disc"), exist_ok=True)
     disc.seek(0)
     parts = {"disc/header.bin": disc.read(0x100),
+             "ticket.bin": p.ticket, "tmd.bin": p.tmd,
              "sys/boot.bin": b["raw"],
              "sys/bi2.bin": p.read(0x440, 0x2000),
              "sys/fst.bin": p.read(b["fst"], b["fst_size"]),

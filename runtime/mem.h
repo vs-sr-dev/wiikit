@@ -4,7 +4,9 @@
 #include <cstddef>
 
 // Reserve 4 GiB of host address space at g_mem and make MEM1 (0x80000000,
-// 24 MiB) and MEM2 (0x90000000, 64 MiB) usable. Returns false on failure.
+// 24 MiB), MEM2 (0x90000000, 64 MiB) and the locked cache (0xE0000000,
+// 16 KiB) usable. The uncached mirrors at 0xC0000000 and 0xD0000000 are
+// folded onto them by ppc_io_*. Returns false on failure.
 bool mem_init();
 // Load a DOL's text and data sections at their addresses and clear its bss.
 // Returns the entry point, or 0 on failure.

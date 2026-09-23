@@ -4,12 +4,15 @@
 // and touch guest state only through this header: registers in PPCContext,
 // memory through ld*/st* (big-endian guest byte order, a flat 4 GiB host
 // reservation at g_mem), and a handful of out-of-line services the runtime
-// provides (indirect calls, system calls, traps, MMIO, time base).
+// provides (indirect calls, system calls, traps, MMIO, time base, the
+// decrementer, and interrupt delivery at safe points: loop back-edges and
+// any mtmsr that sets MSR[EE]).
 //
 // Semantics follow the 750CL manual; where Gekko differs from a plain
 // PowerPC 750 (paired singles, single-precision results filling both
 // halves of an FPR) the rules are Dolphin's interpreter's.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -44,6 +47,11 @@ struct PPCContext {
 
 typedef void (*PPCFunc)(PPCContext&);
 
+// The generated tables: address -> function, replaceable functions, named data.
+struct PPCFuncEntry { uint32_t addr; PPCFunc fn; };
+struct PPCHook { const char* name; uint32_t addr; PPCFunc orig; PPCFunc* slot; };
+struct PPCSymbol { const char* name; uint32_t addr; };
+
 // ---- services provided by the runtime ------------------------------------------------
 extern uint8_t* g_mem;
 void     ppc_call_indirect(PPCContext& c, uint32_t addr);   // bctrl, blrl, indirect tail calls
@@ -52,39 +60,64 @@ void     ppc_trap(PPCContext& c, uint32_t addr);
 void     ppc_unimplemented(PPCContext& c, uint32_t addr, const char* what);
 uint32_t ppc_mmio_read(uint32_t addr, int size);
 void     ppc_mmio_write(uint32_t addr, uint32_t value, int size);
+uint32_t ppc_io_read(uint32_t addr, int size);              // any address >= 0xC0000000
+void     ppc_io_write(uint32_t addr, uint32_t value, int size);
 uint64_t ppc_timebase();
+void     ppc_mttb(int upper, uint32_t v);
+void     ppc_mtdec(uint32_t v);
+uint32_t ppc_mfdec();
 void     ppc_lswx(PPCContext& c, int rd, uint32_t ea, uint32_t n);
 void     ppc_stswx(PPCContext& c, int rs, uint32_t ea, uint32_t n);
 
+// Replace a named function (from the hook list the code was generated with);
+// returns the recompiled original, or nullptr if the executable lacks it.
+PPCFunc  ppc_hook(const char* name, PPCFunc fn);
+uint32_t ppc_symbol(const char* name);                      // 0 if not in the list
+
+// ---- interrupts --------------------------------------------------------------------
+// Nonzero when an interrupt may be ready. Recompiled code checks it at every
+// backward branch and whenever it sets MSR[EE]; the runtime then delivers
+// whatever is pending, if MSR[EE] allows, through the guest's own handlers.
+extern std::atomic<uint32_t> g_ppc_pending;
+void ppc_poll(PPCContext& c);
+#define PPC_POLL(c) do { if (PPC_UNLIKELY(g_ppc_pending.load(std::memory_order_relaxed))) ppc_poll(c); } while (0)
+static inline void ppc_mtmsr(PPCContext& c, uint32_t v) {
+    c.msr = v;
+    if (v & 0x8000u) PPC_POLL(c);
+}
+
 // ---- memory ---------------------------------------------------------------------
-// 0xCC000000-0xCDFFFFFF is hardware (GX FIFO pipe, PI, VI, DSP, DI...).
-#define PPC_IS_MMIO(a) (((a) & 0xFE000000u) == 0xCC000000u)
+// Below 0xC0000000 the guest address indexes host memory directly (MEM1 at
+// 0x80000000, MEM2 at 0x90000000). Above it, ppc_io_*: the uncached mirrors
+// (0xC0000000, 0xD0000000), the hardware (0xCC000000-0xCDFFFFFF: GX FIFO
+// pipe, PI, VI, DSP, the Hollywood registers...) and the locked cache.
+#define PPC_IS_IO(a) ((a) >= 0xC0000000u)
 
 static inline uint8_t ld8(uint32_t a) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) return (uint8_t)ppc_mmio_read(a, 1);
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) return (uint8_t)ppc_io_read(a, 1);
     return g_mem[a];
 }
 static inline uint16_t ld16(uint32_t a) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) return (uint16_t)ppc_mmio_read(a, 2);
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) return (uint16_t)ppc_io_read(a, 2);
     uint16_t v; std::memcpy(&v, g_mem + a, 2); return PPC_BSWAP16(v);
 }
 static inline uint32_t ld32(uint32_t a) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) return ppc_mmio_read(a, 4);
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) return ppc_io_read(a, 4);
     uint32_t v; std::memcpy(&v, g_mem + a, 4); return PPC_BSWAP32(v);
 }
 static inline uint64_t ld64(uint32_t a) {
     return ((uint64_t)ld32(a) << 32) | ld32(a + 4);
 }
 static inline void st8(uint32_t a, uint8_t v) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) { ppc_mmio_write(a, v, 1); return; }
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) { ppc_io_write(a, v, 1); return; }
     g_mem[a] = v;
 }
 static inline void st16(uint32_t a, uint16_t v) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) { ppc_mmio_write(a, v, 2); return; }
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) { ppc_io_write(a, v, 2); return; }
     v = PPC_BSWAP16(v); std::memcpy(g_mem + a, &v, 2);
 }
 static inline void st32(uint32_t a, uint32_t v) {
-    if (PPC_UNLIKELY(PPC_IS_MMIO(a))) { ppc_mmio_write(a, v, 4); return; }
+    if (PPC_UNLIKELY(PPC_IS_IO(a))) { ppc_io_write(a, v, 4); return; }
     v = PPC_BSWAP32(v); std::memcpy(g_mem + a, &v, 4);
 }
 static inline void st64(uint32_t a, uint64_t v) {

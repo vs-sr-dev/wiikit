@@ -15,6 +15,7 @@ struct Region { uint32_t base, size; };
 static const Region kRegions[] = {
     {0x80000000u, 0x01800000u},   // MEM1, 24 MiB
     {0x90000000u, 0x04000000u},   // MEM2, 64 MiB
+    {0xE0000000u, 0x00004000u},   // the locked half of the L1 data cache, 16 KiB
 };
 
 bool mem_init() {

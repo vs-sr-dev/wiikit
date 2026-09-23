@@ -1,0 +1,61 @@
+# Functions the runtime may replace (ppc_hook). The recompiler gives each a
+# slot; an empty slot runs the recompiled code. `@name` asks for a data symbol.
+# Names the executable lacks are skipped, so this list serves every game.
+
+# the OS: guest threads run on host threads, one at a time (os.cpp)
+OSLoadContext          # the context switch: hand the CPU to another host thread
+OSSaveContext          # learns which guest thread a host thread carries
+OSCreateThread         # marks a context as a new thread to start
+
+# console and fatal stops
+__write_console        # MSL's console output: printf, OSReport
+PPCHalt                # the CPU stops: OSPanic ends here
+OSFatal                # the error screen
+
+# leaving the game
+OSReturnToMenu
+OSRestart
+OSShutdownSystem
+__OSReboot
+
+# the MMU: nothing to configure on a flat address space
+RealMode               # rfi into a real-mode routine that sets the BATs
+
+# the Wii Remote: the public WPAD and KPAD API (wpad.cpp); the Bluetooth
+# stack below it never starts
+WPADInit
+WPADRegisterAllocator
+WPADGetStatus
+WPADProbe
+WPADDisconnect
+WPADSetAutoSamplingBuf
+WPADSetCallbackByKPAD
+WPADIsUsedCallbackByKPAD
+WPADSetConnectCallback
+WPADSetExtensionCallback
+WPADSetSimpleSyncCallback
+WPADStartFastSimpleSync
+WPADStopSimpleSync
+WPADControlMotor
+WPADEnableMotor
+WPADIsMotorEnabled
+WPADControlSpeaker
+WPADIsSpeakerEnabled
+WPADCanSendStreamData
+WPADSendStreamData
+WPADGetSpeakerVolume
+WPADSetSpeakerVolume
+WPADGetSensorBarPosition
+WPADGetRadioSensitivity
+WPADGetInfoAsync
+WPADSaveConfig
+KPADInit
+KPADReset
+KPADRead
+KPADSetPosParam
+KPADSetAccParam
+KPADSetConnectCallback
+KPADEnableDPD
+KPADDisableDPD
+KPADGetSensorHeight
+KPADIsEnableAimingMode

@@ -117,14 +117,14 @@ def emit(ins, addr, fn):
         t = f["LI"] if f["AA"] else (addr + f["LI"]) & 0xFFFFFFFF
         if f["LK"]:
             return [f"c.lr = {_h(nxt)}; {fn.call(t)}"]
-        return [fn.jump(t)]
+        return [fn.jump(t, addr)]
     if op == "bc":
         t = f["BD"] if f["AA"] else (addr + f["BD"]) & 0xFFFFFFFF
         pre, cond = _bc_cond(f["BO"], f["BI"])
         if f["LK"]:
             act = f"c.lr = {_h(nxt)};" if t == nxt else f"c.lr = {_h(nxt)}; {fn.call(t)}"
         else:
-            act = fn.jump(t)
+            act = fn.jump(t, addr)
         return [f"{{ {pre}if ({cond}) {{ {act} }} }}" if cond else f"{{ {pre}{act} }}"]
     if op == "bclr":
         pre, cond = _bc_cond(f["BO"], f["BI"])
@@ -292,8 +292,8 @@ def emit(ins, addr, fn):
     # ---- system registers ---------------------------------------------------------------
     if op == "mfspr":
         n, D = f["spr"], f["D"]
-        src = {1: "mfxer(c)", 8: "c.lr", 9: "c.ctr", 268: "(uint32_t)ppc_timebase()",
-               269: "(uint32_t)(ppc_timebase() >> 32)"}.get(n)
+        src = {1: "mfxer(c)", 8: "c.lr", 9: "c.ctr", 22: "ppc_mfdec()",
+               268: "(uint32_t)ppc_timebase()", 269: "(uint32_t)(ppc_timebase() >> 32)"}.get(n)
         if src is None:
             src = f"c.gqr[{n - 912}]" if 912 <= n < 920 else f"c.spr[{n}]"
         return [f"c.r[{D}] = {src};"]
@@ -301,6 +301,10 @@ def emit(ins, addr, fn):
         n, S = f["spr"], f["D"]
         if n == 1:
             return [f"mtxer(c, c.r[{S}]);"]
+        if n == 22:                       # the decrementer: an interrupt source
+            return [f"ppc_mtdec(c.r[{S}]);"]
+        if n in (284, 285):               # TBL, TBU
+            return [f"ppc_mttb({n - 284}, c.r[{S}]);"]
         dst = {8: "c.lr", 9: "c.ctr"}.get(n) or (f"c.gqr[{n - 912}]" if 912 <= n < 920 else f"c.spr[{n}]")
         return [f"{dst} = c.r[{S}];"]
     if op == "mftb":
@@ -308,7 +312,7 @@ def emit(ins, addr, fn):
     if op == "mfmsr":
         return [f"c.r[{f['D']}] = c.msr;"]
     if op == "mtmsr":
-        return [f"c.msr = c.r[{f['S']}];"]
+        return [f"ppc_mtmsr(c, c.r[{f['S']}]);"]
     if op == "mfcr":
         return [f"c.r[{f['D']}] = mfcr(c);"]
     if op == "mtcrf":
