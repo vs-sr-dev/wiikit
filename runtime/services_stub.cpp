@@ -5,6 +5,7 @@
 
 std::atomic<uint32_t> g_ppc_pending{0};
 void ppc_poll(PPCContext&) {}
+void ppc_idle(PPCContext&) {}
 
 void ppc_syscall(PPCContext&, uint32_t addr) { rt_die("sc at %08X", addr); }
 void ppc_trap(PPCContext&, uint32_t addr) { rt_die("trap at %08X", addr); }

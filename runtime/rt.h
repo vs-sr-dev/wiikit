@@ -31,12 +31,13 @@ std::string guest_cstr(uint32_t addr, size_t max = 256);
 
 // ---- the OS layer (os.cpp) --------------------------------------------------------------
 void os_install();                                // hooks, time
-void os_run_main(uint32_t entry);                 // run __start on a guest host thread; returns at exit
+void os_start_main(uint32_t entry);               // run __start on a guest host thread, and return
 void os_raise();                                  // a device changed its interrupt line
 uint64_t os_tb_now();                             // guest time base now
 void os_watch(int seconds);                       // report the running thread periodically
 
 // ---- GX (gx.cpp) -----------------------------------------------------------------
+void gx_init();                                   // after video_configure
 void gx_report();                                 // command stream statistics
 
 // ---- the hardware (hw.cpp) -----------------------------------------------------------

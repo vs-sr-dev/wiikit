@@ -81,6 +81,10 @@ uint32_t ppc_symbol(const char* name);                      // 0 if not in the l
 extern std::atomic<uint32_t> g_ppc_pending;
 void ppc_poll(PPCContext& c);
 #define PPC_POLL(c) do { if (PPC_UNLIKELY(g_ppc_pending.load(std::memory_order_relaxed))) ppc_poll(c); } while (0)
+// The back-edge of a loop that can only end by an interrupt (the recompiler
+// finds them: the SDK's idle loop): the host thread waits for the line.
+void ppc_idle(PPCContext& c);
+#define PPC_IDLE(c) ppc_idle(c)
 static inline void ppc_mtmsr(PPCContext& c, uint32_t v) {
     c.msr = v;
     if (v & 0x8000u) PPC_POLL(c);

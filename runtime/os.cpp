@@ -246,15 +246,31 @@ bool dec_due() {
 // The clock thread sleeps until the next event, or until kicked (a new
 // decrementer value). Condition-variable timeouts are only as fine as the
 // system tick on some hosts (15.6 ms on Windows through winpthreads), far
-// too coarse for OSSleepTicks: it sleeps in whole milliseconds while more
-// than 2 ms remain, then yields until the moment.
+// too coarse for OSSleepTicks. On Windows a high-resolution waitable timer
+// (Windows 10 1803 and later) wakes it within a fraction of a millisecond;
+// elsewhere, and on older Windows, it sleeps in whole milliseconds. It
+// yields only through the last 200 microseconds.
 std::atomic<bool> g_kick{false};
 #ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 HANDLE g_kick_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+HANDLE g_clock_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                              TIMER_ALL_ACCESS);
 void clock_kick() { g_kick = true; SetEvent(g_kick_event); }
 void clock_block(std::chrono::nanoseconds d) {
-    WaitForSingleObject(g_kick_event, (DWORD)(d.count() / 1000000));
+    if (!g_clock_timer) {
+        WaitForSingleObject(g_kick_event, (DWORD)(d.count() / 1000000));
+        return;
+    }
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)(d.count() / 100);   // relative, in 100 ns units
+    SetWaitableTimer(g_clock_timer, &due, 0, nullptr, nullptr, FALSE);
+    HANDLE h[2] = {g_kick_event, g_clock_timer};
+    WaitForMultipleObjects(2, h, FALSE, INFINITE);
 }
+const auto clock_margin = std::chrono::microseconds(g_clock_timer ? 200 : 1500);
 #else
 std::mutex g_kick_mx;
 std::condition_variable g_kick_cv;
@@ -263,16 +279,33 @@ void clock_block(std::chrono::nanoseconds d) {
     std::unique_lock<std::mutex> lk(g_kick_mx);
     g_kick_cv.wait_for(lk, d);
 }
+const auto clock_margin = std::chrono::microseconds(200);
 #endif
 void clock_sleep(Clock::time_point wake) {
     using namespace std::chrono;
     for (;;) {
         auto left = wake - Clock::now();
         if (left <= nanoseconds(0) || g_kick.exchange(false)) return;
-        if (left > milliseconds(2)) clock_block(duration_cast<nanoseconds>(left - microseconds(1500)));
+        if (left > clock_margin + microseconds(100)) clock_block(duration_cast<nanoseconds>(left - clock_margin));
         else std::this_thread::yield();
     }
 }
+
+// The idle loop's host thread waits here for the interrupt line (ppc_idle).
+std::atomic<bool> g_idle_waiting{false};
+#ifdef _WIN32
+HANDLE g_idle_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+void idle_wake() { SetEvent(g_idle_event); }
+void idle_wait() { WaitForSingleObject(g_idle_event, 1); }
+#else
+std::mutex g_idle_mx;
+std::condition_variable g_idle_cv;
+void idle_wake() { g_idle_cv.notify_one(); }
+void idle_wait() {
+    std::unique_lock<std::mutex> lk(g_idle_mx);
+    g_idle_cv.wait_for(lk, std::chrono::milliseconds(1));
+}
+#endif
 
 // The clock keeps host time: the guest may rewrite the time base (mttb), so
 // only the decrementer's distance is measured in guest ticks.
@@ -385,7 +418,21 @@ uint32_t ppc_mfdec() {
     return (uint32_t)(g_dec_deadline - 1 - os_tb_now());
 }
 
-void os_raise() { g_ppc_pending.store(1, std::memory_order_relaxed); }
+void os_raise() {
+    g_ppc_pending.store(1, std::memory_order_seq_cst);
+    if (g_idle_waiting.load(std::memory_order_seq_cst)) idle_wake();
+}
+
+// Nothing but an interrupt can end the loop: wait for one (with a 1 ms
+// bound, in case a line is raised some other way), then deliver it.
+void ppc_idle(PPCContext& c) {
+    if (!g_ppc_pending.load(std::memory_order_relaxed) && (c.msr & MSR_EE)) {
+        g_idle_waiting.store(true, std::memory_order_seq_cst);
+        if (!g_ppc_pending.load(std::memory_order_seq_cst)) idle_wait();
+        g_idle_waiting.store(false, std::memory_order_relaxed);
+    }
+    PPC_POLL(c);
+}
 
 void ppc_poll(PPCContext& c) {
     while (c.msr & MSR_EE) {
@@ -454,7 +501,7 @@ void watch_main(int seconds) {
 
 void os_watch(int seconds) { std::thread(watch_main, seconds).detach(); }
 
-void os_run_main(uint32_t entry) {
+void os_start_main(uint32_t entry) {
     HostThread* h = new HostThread;
     h->c.msr = 0x00002032;                     // FP, IR, DR, RI; interrupts off, as the IPL leaves it
     {
@@ -462,5 +509,4 @@ void os_run_main(uint32_t entry) {
         g_running = h;
     }
     spawn(h, entry);
-    for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
 }

@@ -17,6 +17,7 @@
 // logged with the guest function that made it: the to-do list of a new game.
 // WIIKIT_DSPDBG=1 in the environment traces the DSP's mails and control.
 #include "rt.h"
+#include "video.h"
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -90,7 +91,18 @@ uint16_t vi_read(uint32_t off) {
 }
 void vi_write(uint32_t off, uint16_t v) {
     if (off == 0x02) v &= ~2;                        // DCR reset bit reads back 0
+    static bool dbg = std::getenv("WIIKIT_VIDBG") != nullptr;
+    if (dbg && vi[off / 2] != v && off != 0x1C && off != 0x1E && off != 0x24 && off != 0x26 && off < 0x30)
+        rt_log("vi: %02X = %04X", off, v);
     vi[off / 2] = v;
+    if (off == 0x00 || off == 0x02) {                // VTR's active lines per field, DCR's non-interlaced bit
+        uint32_t acv = vi[0x00] >> 4 & 0x3FF;
+        if (acv) video_set_lines(acv * (vi[0x01] & 4 ? 1 : 2));
+    }
+    if (off == 0x1C || off == 0x1E) {                // TFBL: the top field's XFB (POFF: address >> 5)
+        uint32_t t = (uint32_t)vi[0x0E] << 16 | vi[0x0F];
+        video_set_xfb((t & 0xFFFFFF) << (t >> 28 & 1 ? 5 : 0));
+    }
 }
 
 // ---- DSP ------------------------------------------------------------------------------------
@@ -577,6 +589,7 @@ void hw_vi_retrace() {
         if (hi & 0x1000) { hi |= 0x8000; any = true; }
     }
     if (any) os_raise();
+    video_retrace();
 }
 
 // The fonts OSInitFont reads from the boot ROM, Yay0-compressed: Shift-JIS at

@@ -60,10 +60,32 @@ class FnCtx:
         self.unit, _ = prog.body(entry)
         self.tables = prog.tables
 
+    # A loop that only reads the small-data area (r13, r2: never hardware)
+    # and compares can end only when an interrupt handler changes memory, since
+    # one guest thread runs at a time: the SDK's idle loop in SelectThread,
+    # spinning on RunQueueBits. Its back-edge waits for the interrupt line.
+    IDLE_OPS = {"lwz", "lhz", "lha", "lbz", "cmpi", "cmpli", "cmp", "cmpl", "rlwinm", "ori", "bc"}
+
+    def idle_loop(self, t, src):
+        if not hasattr(self, "_ins"):
+            self._ins = dict(self.unit.ins)
+        body = [self._ins.get(a) for a in range(t, src + 4, 4)]
+        if not body or len(body) > 8 or any(i is None or i.op not in self.IDLE_OPS for i in body):
+            return False
+        if body[-1].op != "bc" or any(i.op == "bc" for i in body[:-1]):
+            return False
+        if any(i.op == "ori" and (i.f["S"] or i.f["A"] or i.f["uimm"]) for i in body):   # only nop
+            return False
+        loads = [i for i in body if i.op in ("lwz", "lhz", "lha", "lbz")]
+        return bool(loads) and all(i.f["A"] in (2, 13) for i in loads)
+
     def jump(self, t, src):
         if self.entry <= t < self.unit.end:
             # a backward branch closes a loop: the safe point for interrupts
-            return f"goto L_{t:08X};" if t > src else f"PPC_POLL(c); goto L_{t:08X};"
+            if t > src:
+                return f"goto L_{t:08X};"
+            poll = "PPC_IDLE(c);" if self.idle_loop(t, src) else "PPC_POLL(c);"
+            return f"{poll} goto L_{t:08X};"
         if t in self.entries:
             return f"{{ {E.fname(t)}(c); return; }}"
         return f'{{ ppc_unimplemented(c, 0x{t:08X}u, "branch to unknown target"); return; }}'
