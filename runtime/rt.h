@@ -42,6 +42,7 @@ void os_start_main(uint32_t entry);               // run __start on a guest host
 void os_raise();                                  // a device changed its interrupt line
 uint64_t os_tb_now();                             // guest time base now
 void os_watch(int seconds);                       // report the running thread periodically
+void os_profile();                                // WIIKIT_PROFILE: sample the guest code, list the hot functions
 
 // ---- GX (gx.cpp) -----------------------------------------------------------------
 void gx_init();                                   // after video_configure
@@ -57,6 +58,14 @@ extern bool g_mmio_log;                            // log every first access to 
 
 // ---- the Wii Remote (wpad.cpp) -------------------------------------------------------
 void wpad_install();                               // WPAD/KPAD hooks
+
+// ---- audio (ax.cpp, audio.cpp) --------------------------------------------------------
+void ax_command_list(uint32_t addr);               // the AX micro-code: mix one frame
+bool ax_load_coefs(const char* dir);               // dsp_coef.bin: the polyphase resampler's table
+void audio_init(bool enabled);                     // the host's audio device (SDL3); false: none
+// A block the AI DMA starts playing: frames of big-endian 16-bit stereo,
+// right then left, as the Wii's AI reads them.
+void audio_play(const uint8_t* be_rl, uint32_t frames, uint32_t rate);
 
 // ---- IOS (ios.cpp) ------------------------------------------------------------------
 void ios_init(const char* disc_root, const char* nand_root);

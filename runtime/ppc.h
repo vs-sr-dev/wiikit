@@ -244,8 +244,12 @@ static inline void mtfsf(PPCContext& c, uint32_t fm, double b) {
 }
 
 // ---- paired-single quantisation (GQRs) --------------------------------------------------
+// 2^e for the GQR's scale range (-32..31), built from its exponent bits: psq_l
+// and psq_st are in the inner loops of skinning, too hot for a libm call
+static inline double pow2(int e) { return as_f64((uint64_t)(1023 + e) << 52); }
 static inline double ps_dequant(uint32_t type, int scale, uint32_t ea, int* size) {
-    const double k = std::ldexp(1.0, -scale);
+    if (type < 4) { *size = 4; return (double)as_f32(ld32(ea)); }
+    const double k = pow2(-scale);
     switch (type) {
     case 4: *size = 1; return ld8(ea) * k;
     case 5: *size = 2; return ld16(ea) * k;
@@ -255,7 +259,8 @@ static inline double ps_dequant(uint32_t type, int scale, uint32_t ea, int* size
     }
 }
 static inline void ps_quant(uint32_t type, int scale, uint32_t ea, double v, int* size) {
-    const double x = v * std::ldexp(1.0, scale);
+    if (type < 4) { *size = 4; st32(ea, as_u32((float)v)); return; }
+    const double x = v * pow2(scale);
     auto clampi = [](double y, double lo, double hi) { return y < lo ? lo : y > hi ? hi : y; };
     switch (type) {
     case 4: *size = 1; st8(ea, (uint8_t)clampi(x, 0, 255)); break;

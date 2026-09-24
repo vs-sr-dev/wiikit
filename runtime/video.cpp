@@ -2,7 +2,7 @@
 //
 // It runs on the host's main thread, which owns the window and the GL
 // context; the game runs on its own threads and hands over its GX record
-// (video.h) in chunks, at most two frames ahead. The renderer keeps a mirror
+// (video.h) in chunks, at most --frames-ahead frames ahead. The renderer keeps a mirror
 // of the BP and XF registers from the record and turns each draw into GL
 // state and a program generated from the TEV configuration (gxshader.cpp).
 //
@@ -48,6 +48,7 @@ struct Chunk { std::vector<uint8_t> data; int frames; };
 std::mutex qmx;
 std::condition_variable q_space;
 std::deque<Chunk> q;
+std::vector<std::vector<uint8_t>> spare;           // record buffers to reuse (under qmx)
 int q_frames = 0;
 SDL_Semaphore* wake = nullptr;
 std::atomic<uint32_t> xfb_addr{0}, retraces{0}, vi_lines{480};
@@ -775,13 +776,28 @@ void setup() {
 bool video_enabled() { return opt.enabled; }
 void video_configure(const VideoOptions& o) { opt = o; S = std::max(1, o.scale); }
 
+VideoPerf g_vperf;
+bool g_vperf_on = std::getenv("WIIKIT_PERF") != nullptr;
+
 void video_submit(std::vector<uint8_t>& rec, int frames) {
+    auto t0 = Clock::now();
     std::unique_lock<std::mutex> lk(qmx);
-    q_space.wait(lk, [] { return q_frames < 2 && q.size() < 256; });
+    // frames in flight: each one queued is 33 ms more between what the game
+    // decides and what is seen, and one less the game and the renderer can
+    // work on side by side
+    q_space.wait(lk, [] { return q_frames < opt.frames_ahead && q.size() < 256; });
+    if (g_vperf_on) g_vperf.wait += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
     q.push_back(Chunk{std::move(rec), frames});
     q_frames += frames;
-    rec = std::vector<uint8_t>();
-    rec.reserve(1u << 20);
+    // a buffer the renderer is done with, capacity and pages kept: fresh
+    // allocations of megabytes a frame cost page faults and copies as they grow
+    if (!spare.empty()) {
+        rec = std::move(spare.back());
+        spare.pop_back();
+    } else {
+        rec = std::vector<uint8_t>();
+        rec.reserve(2u << 20);
+    }
     lk.unlock();
     if (wake) SDL_SignalSemaphore(wake);
 }
@@ -859,6 +875,13 @@ void video_run(const char* title) {
             char buf[256];
             std::snprintf(buf, sizeof buf, "%s  |  %.1f fps", base_title.c_str(), (double)(cnt.frames - frames_then) / s);
             SDL_SetWindowTitle(win, buf);
+            if (g_vperf_on && cnt.frames > frames_then) {
+                double f = (double)(cnt.frames - frames_then);
+                auto ms = [&](std::atomic<uint64_t>& a) { return (double)a.exchange(0) / 1e6 / f; };
+                double vtx = ms(g_vperf.vtx), tex = ms(g_vperf.tex), wait = ms(g_vperf.wait), draw = ms(g_vperf.draw);
+                rt_log("perf: %.1f fps; frame %.1f ms; game thread: vertices %.1f, textures %.1f, waiting for the renderer %.1f; renderer %.1f ms",
+                       f / s, 1000.0 * s / f, vtx, tex, wait, draw);
+            }
             frames_then = cnt.frames;
             t_title = now;
         }
@@ -871,10 +894,14 @@ void video_run(const char* title) {
                 c = std::move(q.front());
                 q.pop_front();
             }
+            auto te = Clock::now();
             exec(c.data);
+            if (g_vperf_on) g_vperf.draw += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - te).count();
             {
                 std::lock_guard<std::mutex> lk(qmx);
                 q_frames -= c.frames;
+                c.data.clear();
+                if (spare.size() < 16) spare.push_back(std::move(c.data));
             }
             q_space.notify_all();
             busy = true;

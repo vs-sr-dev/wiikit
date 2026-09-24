@@ -5,7 +5,8 @@
 //   PI   interrupt cause and mask; the CPU FIFO registers (gx.cpp)
 //   VI   the retrace interrupts (DI0-DI3), the beam position
 //   DSP  reset/halt, mailboxes, ARAM DMA, the micro-codes (ROM, the audio
-//        init code, AX: silent) and the AI DMA that paces audio frames
+//        init code, AX: the mixer is ax.cpp) and the AI DMA that paces audio
+//        frames and hands each block to the host's audio (audio.cpp)
 //   AI   the sample counter
 //   EXI  three channels; channel 0 device 1 is the IPL chip: RTC, SRAM, UART,
 //        and the boot ROM, which holds the system fonts (hw_load_fonts)
@@ -20,6 +21,7 @@
 #include "video.h"
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <mutex>
@@ -35,7 +37,7 @@ uint32_t gx_pe_read(uint32_t off, int size);
 void gx_pe_write(uint32_t off, uint32_t v, int size);
 uint32_t gx_pi_fifo_read(uint32_t off);
 void gx_pi_fifo_write(uint32_t off, uint32_t v);
-void gx_pipe_write(uint32_t v, int size);
+void gx_pipe_burst(const uint8_t* b, int n);
 uint32_t gx_irq();                                   // PI cause bits 9-11
 
 namespace {
@@ -162,8 +164,9 @@ void dsp_receive(uint32_t m) {                       // a mail from the CPU, tak
         }
         break;
     case Ucode::AX:
-        if (dsp_cmdlist_next) {                      // the command list: done
+        if (dsp_cmdlist_next) {                      // the command list's address: mix a frame
             dsp_cmdlist_next = false;
+            ax_command_list(m);
             ++dsp_frames;
             dsp_send(0xDCD10002, true);
         } else if ((m >> 16) == 0xBABE) {
@@ -205,10 +208,19 @@ bool ai_dma_on = false;
 HostClock::time_point ai_dma_next, ai_dma_block_start;
 std::chrono::nanoseconds ai_dma_period{0};
 uint32_t ai_cr = 0;
-void ai_dma_block() {                                // a block starts: interrupt
+void ai_dma_block() {                                // a block starts: its samples play, interrupt
     uint16_t ctl = (uint16_t)store_read(0xCC005036, 2);
     uint32_t rate = (ai_cr & 0x40) ? 32000 : 48000;  // AICR bit 6: DMA sample rate
     uint64_t bytes = (uint64_t)(ctl & 0x7FFF) * 32;
+    uint32_t addr = (store_read(0xCC005030, 2) << 16 | store_read(0xCC005032, 2)) & 0x1FFFFFE0u;
+    // AX mixes one frame per block, in the guest's AI interrupt. When the
+    // guest was too busy to take it (a heavy load), the AI would play the
+    // previous frame again, a 3 ms buzz: such a block is not played.
+    static uint64_t frames_then = ~0ull, stale = 0;
+    bool fresh = dsp_ucode != Ucode::AX || dsp_frames != frames_then;
+    frames_then = dsp_frames;
+    if (fresh) audio_play(host(virt(addr)), (uint32_t)bytes / 4, rate);
+    else if (++stale % 50 == 1) rt_log("audio: %llu blocks without a new AX frame", (unsigned long long)stale);
     ai_dma_period = std::chrono::nanoseconds(bytes * 1000000000ull / (4ull * rate));
     ai_dma_block_start = HostClock::now();
     dsp_cr |= DSP_AIDINT;
@@ -521,7 +533,7 @@ void mmio_write(uint32_t a, uint32_t v, int size) {
             break;
         case 0x5: write16x(dsp_read, dsp_write, off & 0xFFF, v, size); os_raise(); return;
         case 0x6: mmio_write(0xCD000000u | off, v, size); return;
-        case 0x8: gx_pipe_write(v, size); return;
+        case 0x8: return;                            // the gather pipe: ppc_mmio_write
         }
         store_write(a, v, size);
         return;
@@ -556,7 +568,22 @@ uint32_t ppc_mmio_read(uint32_t a, int size) {
     return v;
 }
 
+// the write-gather pipe's buffer (gx.cpp): only the running guest thread
+// stores into it, so it needs no lock until it bursts
+uint8_t gather[64];
+int gathered = 0;
+
 void ppc_mmio_write(uint32_t a, uint32_t v, int size) {
+    if ((a & 0xFFFFF000u) == 0xCC008000u) {
+        for (int i = 0; i < size; ++i) gather[gathered++] = (uint8_t)(v >> (8 * (size - 1 - i)));
+        if (gathered >= 32) {
+            std::lock_guard<std::recursive_mutex> lk(g_hw);
+            gx_pipe_burst(gather, 32);
+            gathered -= 32;
+            std::memmove(gather, gather + 32, (size_t)gathered);
+        }
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lk(g_hw);
     if ((a & 0xFFFFF000u) != 0xCC008000u) log_access('W', a, size, v);
     mmio_write(a, v, size);

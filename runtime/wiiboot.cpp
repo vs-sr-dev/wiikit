@@ -1,12 +1,14 @@
 // wiiboot — run a recompiled Wii disc game.
 //
 //     wiiboot EXTRACT_DIR [--nand DIR] [--fonts DIR] [--symbols symbols.tsv] [--mmio-log] [--watch SECONDS]
-//                         [--no-video] [--scale N] [--dump DIR] [--dump-every N] [--quit-after SECONDS]
+//                         [--no-video] [--no-audio] [--scale N] [--frames-ahead N] [--dump DIR]
+//                         [--dump-every N] [--quit-after SECONDS]
 //
 // EXTRACT_DIR comes from `python -m wiikit.disc GAME --extract`. The NAND
 // (saves, SYSCONF) is a host folder, EXTRACT_DIR/../nand by default. The
-// boot ROM's fonts (font_western.bin, font_japanese.bin: Dolphin's Sys/GC
-// has free ones) are looked for in EXTRACT_DIR/../fonts.
+// boot ROM's fonts (font_western.bin, font_japanese.bin) and the DSP ROM's
+// resampling table (dsp_coef.bin) are looked for in EXTRACT_DIR/../fonts:
+// Dolphin's Sys/GC has free ones.
 //
 // The game runs on its own threads; the main thread runs the window and the
 // renderer (video.cpp), or with --no-video only waits.
@@ -25,11 +27,12 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: wiiboot EXTRACT_DIR [--nand DIR] [--fonts DIR] [--symbols symbols.tsv] "
                              "[--mmio-log] [--watch SECONDS]\n"
-                             "                            [--no-video] [--scale N] [--dump DIR] [--dump-every N] "
-                             "[--quit-after SECONDS]\n");
+                             "                            [--no-video] [--no-audio] [--scale N] [--frames-ahead N] "
+                             "[--dump DIR] [--dump-every N] [--quit-after SECONDS]\n");
         return 2;
     }
     int watch = 0;
+    bool audio = true;
     VideoOptions vo;
     std::string root = argv[1], nand = root + "/../nand", fonts = root + "/../fonts";
     for (int i = 2; i < argc; ++i) {
@@ -39,7 +42,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--mmio-log")) g_mmio_log = true;
         else if (!std::strcmp(argv[i], "--watch") && i + 1 < argc) watch = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--no-video")) vo.enabled = false;
+        else if (!std::strcmp(argv[i], "--no-audio")) audio = false;
         else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc) vo.scale = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--frames-ahead") && i + 1 < argc) vo.frames_ahead = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--dump") && i + 1 < argc) vo.dump_dir = argv[++i];
         else if (!std::strcmp(argv[i], "--dump-every") && i + 1 < argc) vo.dump_every = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--quit-after") && i + 1 < argc) vo.quit_after = std::atof(argv[++i]);
@@ -52,11 +57,14 @@ int main(int argc, char** argv) {
     gx_init();
     hw_init();
     if (!hw_load_fonts(fonts.c_str())) rt_log("wiiboot: no boot ROM fonts in %s", fonts.c_str());
+    if (!ax_load_coefs(fonts.c_str())) rt_log("wiiboot: no dsp_coef.bin in %s: linear resampling", fonts.c_str());
+    audio_init(audio);
     ios_init(root.c_str(), nand.c_str());
     os_install();
     wpad_install();
     rt_game_install();
     if (watch) os_watch(watch);
+    if (std::getenv("WIIKIT_PROFILE")) os_profile();
     char id[7] = {}, name[65] = {};                           // the disc header: game id and name
     std::memcpy(id, host(0x80000000), 6);
     if (FILE* f = std::fopen((root + "/sys/boot.bin").c_str(), "rb")) {

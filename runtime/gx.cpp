@@ -18,6 +18,7 @@
 // cached by content, and EFB copies remembered by address so that a texture
 // read from there is the copy, kept on the host GPU.
 #include "rt.h"
+#include <chrono>
 #include "gxtex.h"
 #include "video.h"
 #include <algorithm>
@@ -489,14 +490,26 @@ size_t parse(const uint8_t* p, size_t n, bool in_dl) {
         if (video && count) {
             if (bp[0xF1] >> 21 & 7) warn_once("fog (not drawn), type", bp[0xF1] >> 21 & 7);
             if (bp[0xF4] >> 2 & 3) warn_once("Z texture (not drawn), op", bp[0xF4] >> 2 & 3);
-            sync_textures();
+            if (g_vperf_on) {
+                auto t0 = std::chrono::steady_clock::now();
+                sync_textures();
+                g_vperf.tex += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            } else {
+                sync_textures();
+            }
             put<uint8_t>(VC_DRAW);
             put<uint8_t>(op & 0xF8);
             size_t at = rec.size();
             put<uint8_t>(0);
             put<uint32_t>(count);
             GVtx* out = reinterpret_cast<GVtx*>(grow(count * sizeof(GVtx)));
-            rec[at] = decode_vertices(f, p + 3, count, out);
+            if (g_vperf_on) {
+                auto t0 = std::chrono::steady_clock::now();
+                rec[at] = decode_vertices(f, p + 3, count, out);
+                g_vperf.vtx += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            } else {
+                rec[at] = decode_vertices(f, p + 3, count, out);
+            }
             flush(false);
         }
         return len;
@@ -522,17 +535,19 @@ void feed(const uint8_t* b, int n) {
 
 void gx_init() { video = video_enabled(); }
 
-void gx_pipe_write(uint32_t v, int size) {
-    uint8_t b[4];
-    for (int i = 0; i < size; ++i) b[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
-    for (int i = 0; i < size; ++i) {
+// The write-gather pipe: CPU stores to 0xCC008000 collect in a 32-byte
+// buffer, and reach the FIFO in memory as 32-byte bursts, as on the console
+// (the SDK's GXFlush pads the last one out). The stores themselves take no
+// lock (hw.cpp); a burst does.
+void gx_pipe_burst(const uint8_t* b, int n) {
+    for (int i = 0; i < n; ++i) {
         uint32_t a = pi_wptr & 0x03FFFFFFu;
         *host(virt(a)) = b[i];
         ++a;
         if (pi_end && a >= (pi_end & 0x03FFFFFFu)) pi_wptr = (pi_base & 0x03FFFFFFu) | 0x20000000u;
         else pi_wptr = (pi_wptr & 0x20000000u) | a;
     }
-    if (linked()) feed(b, size);
+    if (linked()) feed(b, n);
 }
 
 uint32_t gx_pi_fifo_read(uint32_t off) {

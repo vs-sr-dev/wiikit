@@ -22,11 +22,14 @@
 // point, unless the handler rescheduled first: then this host thread parks
 // inside SelectThread like any other, still inside the delivery.
 #include "rt.h"
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -61,6 +64,9 @@ struct HostThread {
     bool zombie = false;                 // its guest thread was re-created: unwind and end
     std::vector<uint32_t> delivering;    // contexts interrupted on this host thread
     PPCContext* cur = &c;                // the registers in use: c, or a handler's copy
+#ifdef _WIN32
+    HANDLE handle = nullptr;             // for the sampling profiler
+#endif
 };
 
 std::mutex g_mx;                         // the baton and the thread tables
@@ -133,7 +139,7 @@ void spawn(HostThread* h, uint32_t entry) {
     HANDLE t = CreateThread(nullptr, 64u << 20, host_thread, new Start{h, entry},
                             STACK_SIZE_PARAM_IS_A_STACK_SIZE, nullptr);
     if (!t) rt_die("cannot create a host thread");
-    CloseHandle(t);
+    h->handle = t;                       // kept: the profiler samples it
 }
 #else
 void* host_thread(void* p) {
@@ -500,6 +506,121 @@ void watch_main(int seconds) {
 }
 
 void os_watch(int seconds) { std::thread(watch_main, seconds).detach(); }
+
+#ifdef _WIN32
+// WIIKIT_PROFILE=1: a sampling profiler of the thread holding the baton.
+// About a thousand times a second that host thread is stopped for a moment:
+// its registers and the top 64 KB of its stack are copied into buffers made
+// in advance, and it goes on. Samples in the executable are reported by
+// address (tools/profile_resolve.py names them with nm: the runtime, and
+// recompiled functions by their guest names); a sample in a DLL (the OS
+// waiting, the C library) is unwound on the stack copy to the first return
+// address in the executable, and charged there with the DLL's name.
+namespace {
+bool exe_caller(CONTEXT c, const uint8_t* copy, uintptr_t copy_base, size_t copy_len,
+                uintptr_t lo, uintptr_t hi, uintptr_t& out) {
+    // rebase the stack pointers into the copy, then unwind frame by frame
+    intptr_t delta = (intptr_t)(uintptr_t)copy - (intptr_t)copy_base;
+    c.Rsp += delta;
+    if (c.Rbp >= copy_base && c.Rbp < copy_base + copy_len) c.Rbp += delta;
+    for (int depth = 0; depth < 32; ++depth) {
+        if (c.Rip >= lo && c.Rip < hi) { out = c.Rip; return true; }
+        if (c.Rsp < (uintptr_t)copy || c.Rsp + 8 > (uintptr_t)copy + copy_len) return false;
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Rip, &image, nullptr);
+        if (!f) {                                  // a leaf: the return address is on top
+            c.Rip = *(DWORD64*)c.Rsp;
+            c.Rsp += 8;
+        } else {
+            void* handler_data = nullptr;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, f, &c, &handler_data, &frame, nullptr);
+        }
+        if (!c.Rip) return false;
+    }
+    return false;
+}
+}  // namespace
+
+void profile_main() {
+    uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr);
+    auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    uintptr_t lo = base, hi = base + nt->OptionalHeader.SizeOfImage;
+    constexpr size_t kStack = 64 * 1024;
+    std::vector<uint8_t> copy(kStack);
+    std::unordered_map<uintptr_t, uint32_t> in_exe;                  // by address (image base 0x140000000)
+    std::map<std::pair<HMODULE, uintptr_t>, uint32_t> via_dll;        // DLL, calling address
+    uint64_t total = 0, dll = 0, lost = 0;
+    timeBeginPeriod(1);
+    auto next = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    auto norm = [&](uintptr_t ip) { return (ip - base + 0x140000000ull) & ~(uintptr_t)15; };
+    for (;;) {
+        Sleep(1);
+        HANDLE t = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_mx);
+            if (g_running) t = g_running->handle;
+        }
+        if (!t) continue;
+        CONTEXT ctx;
+        ctx.ContextFlags = CONTEXT_FULL;
+        if (SuspendThread(t) == (DWORD)-1) continue;
+        BOOL ok = GetThreadContext(t, &ctx);
+        size_t len = 0;
+        if (ok) {                                   // the stack, as far as it is committed
+            MEMORY_BASIC_INFORMATION mi;
+            if (VirtualQuery((void*)ctx.Rsp, &mi, sizeof mi)) {
+                uintptr_t end = (uintptr_t)mi.BaseAddress + mi.RegionSize;
+                len = std::min<size_t>(kStack, end - ctx.Rsp);
+                std::memcpy(copy.data(), (void*)ctx.Rsp, len);
+            }
+        }
+        ResumeThread(t);
+        if (!ok) continue;
+        ++total;
+        uintptr_t ip = (uintptr_t)ctx.Rip;
+        if (ip >= lo && ip < hi) {
+            ++in_exe[norm(ip)];
+        } else {
+            ++dll;
+            HMODULE m = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)ip, &m);
+            uintptr_t caller = 0;
+            if (len && exe_caller(ctx, copy.data(), (uintptr_t)ctx.Rsp, len, lo, hi, caller)) ++via_dll[{m, norm(caller)}];
+            else ++lost;
+        }
+        if (std::chrono::steady_clock::now() < next) continue;
+        next += std::chrono::seconds(10);
+        std::fprintf(stderr, "profile: %llu samples, %.1f%% in DLLs (%.1f%% of those not traced back)\n",
+                     (unsigned long long)total, total ? 100.0 * dll / total : 0.0, dll ? 100.0 * lost / dll : 0.0);
+        std::vector<std::pair<uint32_t, uintptr_t>> top;
+        for (auto& [a, n] : in_exe) top.push_back({n, a});
+        std::sort(top.rbegin(), top.rend());
+        for (size_t k = 0; k < top.size() && k < 80; ++k)
+            std::fprintf(stderr, "profile-raw: %llx %u\n", (unsigned long long)top[k].second, top[k].first);
+        std::vector<std::pair<uint32_t, std::pair<HMODULE, uintptr_t>>> tops;
+        for (auto& [k, n] : via_dll) tops.push_back({n, k});
+        std::sort(tops.rbegin(), tops.rend());
+        for (size_t k = 0; k < tops.size() && k < 40; ++k) {
+            char name[MAX_PATH] = "?";
+            GetModuleFileNameA(tops[k].second.first, name, sizeof name);
+            const char* slash = std::strrchr(name, '\\');
+            std::fprintf(stderr, "profile-raw: %llx %u %s\n", (unsigned long long)tops[k].second.second, tops[k].first,
+                         slash ? slash + 1 : name);
+        }
+        in_exe.clear();
+        via_dll.clear();
+        total = dll = lost = 0;
+    }
+}
+#endif
+
+void os_profile() {
+#ifdef _WIN32
+    std::thread(profile_main).detach();
+#endif
+}
 
 void os_start_main(uint32_t entry) {
     HostThread* h = new HostThread;
