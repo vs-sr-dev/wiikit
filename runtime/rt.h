@@ -17,6 +17,13 @@ void rt_log(const char* fmt, ...);                 // stderr, one line
 // The guest call chain from a context: LR, then the saved LRs up the back chain.
 void rt_backtrace(const PPCContext& c, FILE* out, int max = 24);
 
+// A port's own layer: code linked into wiiboot next to the runtime (the
+// project's WIIKIT_EXTRA adds it) registers an install function with a
+// static RtGameLayer; wiiboot runs it after the runtime's own hooks, before
+// the game starts. Its hooks come from the recompiler's --hooks file.
+struct RtGameLayer { RtGameLayer(const char* name, void (*install)()); };
+void rt_game_install();
+
 // Registers of the guest code currently running on this host thread (for
 // crash reports and "who touched this register" logs). Set by the OS layer.
 extern thread_local PPCContext* t_ppc;

@@ -43,6 +43,20 @@ PPCFunc ppc_hook(const char* name, PPCFunc fn) {
     return nullptr;
 }
 
+namespace {
+struct Layer { const char* name; void (*install)(); };
+std::vector<Layer>& layers() { static std::vector<Layer> v; return v; }   // filled during static init
+}
+
+RtGameLayer::RtGameLayer(const char* name, void (*install)()) { layers().push_back({name, install}); }
+
+void rt_game_install() {
+    for (const Layer& l : layers()) {
+        rt_log("wiiboot: game layer %s", l.name);
+        l.install();
+    }
+}
+
 uint32_t ppc_symbol(const char* name) {
     for (const PPCSymbol* s = g_ppc_symbols; s->name; ++s)
         if (!std::strcmp(s->name, name)) return s->addr;

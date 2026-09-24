@@ -581,38 +581,53 @@ void write_png(const std::string& path, int w, int h, const uint8_t* rgba) {
 
 namespace {
 
-// Debugging keys until the mouse-driven Remote (phase 4): Enter, Z or the
-// left button = A; X, Backspace or the right button = B; arrows = the
-// d-pad; +/- ; 1, 2; H = Home. The mouse over the picture is the pointer.
+// The Wii Remote on the mouse and the keyboard. The mouse over the picture
+// is the pointer; left button or Enter = A, right button or Backspace = B;
+// WASD or the arrows = the d-pad; Tab = +, Q = -; 1, 2 = 1, 2; Space or the
+// middle button = a shake. Home has no key: Esc opens the port's own menu
+// (video_run) instead of the Wii's.
 void update_pad() {
     struct K { SDL_Scancode k; uint32_t b; };
-    static const K keys[] = {{SDL_SCANCODE_RETURN, 0x0800}, {SDL_SCANCODE_Z, 0x0800},
-                             {SDL_SCANCODE_X, 0x0400}, {SDL_SCANCODE_BACKSPACE, 0x0400},
+    static const K keys[] = {{SDL_SCANCODE_RETURN, 0x0800}, {SDL_SCANCODE_KP_ENTER, 0x0800},
+                             {SDL_SCANCODE_BACKSPACE, 0x0400},
+                             {SDL_SCANCODE_A, 0x0001}, {SDL_SCANCODE_D, 0x0002},
+                             {SDL_SCANCODE_S, 0x0004}, {SDL_SCANCODE_W, 0x0008},
                              {SDL_SCANCODE_LEFT, 0x0001}, {SDL_SCANCODE_RIGHT, 0x0002},
                              {SDL_SCANCODE_DOWN, 0x0004}, {SDL_SCANCODE_UP, 0x0008},
-                             {SDL_SCANCODE_EQUALS, 0x0010}, {SDL_SCANCODE_KP_PLUS, 0x0010},
-                             {SDL_SCANCODE_MINUS, 0x1000}, {SDL_SCANCODE_KP_MINUS, 0x1000},
-                             {SDL_SCANCODE_1, 0x0200}, {SDL_SCANCODE_2, 0x0100}, {SDL_SCANCODE_H, 0x8000}};
+                             {SDL_SCANCODE_TAB, 0x0010}, {SDL_SCANCODE_Q, 0x1000},
+                             {SDL_SCANCODE_1, 0x0200}, {SDL_SCANCODE_2, 0x0100}};
     const bool* ks = SDL_GetKeyboardState(nullptr);
     PadState p;
     for (const K& k : keys)
         if (ks[k.k]) p.buttons |= k.b;
+    p.shake = ks[SDL_SCANCODE_SPACE];
     float mx = 0, my = 0;
     SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
     if (mb & SDL_BUTTON_LMASK) p.buttons |= 0x0800;
     if (mb & SDL_BUTTON_RMASK) p.buttons |= 0x0400;
+    if (mb & SDL_BUTTON_MMASK) p.shake = true;
     int ww = 0, wh = 0;
     SDL_GetWindowSize(win, &ww, &wh);                        // mouse coordinates are in window units
     if (ww > 0 && wh > 0 && (SDL_GetWindowFlags(win) & SDL_WINDOW_MOUSE_FOCUS)) {
+        // -1..1 spans the picture as present() shows it: the 4:3 screen's
+        // width, and only the lines VI scans out (360 for a letterboxed 16:9),
+        // so that the game's cursor lands under the mouse
         float fw = (float)ww, fh = fw * 3 / 4;
         if (fh > (float)wh) { fh = (float)wh; fw = fh * 4 / 3; }
+        fh = fh * (float)std::min<uint32_t>(vi_lines.load(), 480) / 480;
         p.x = (mx - ((float)ww - fw) / 2) / fw * 2 - 1;
         p.y = (my - ((float)wh - fh) / 2) / fh * 2 - 1;
         p.pointer = p.x >= -1 && p.x <= 1 && p.y >= -1 && p.y <= 1;
     }
+    // over the picture the game draws its own cursor, as on the Wii
+    static bool hidden = false;
+    if (p.pointer != hidden) {
+        hidden = p.pointer;
+        if (hidden) SDL_HideCursor(); else SDL_ShowCursor();
+    }
     // WIIKIT_PAD="45:A 50.5:@0.2,-0.1 51:A": at each time (seconds from
-    // start) press buttons for 150 ms (A B 1 2 + - H U D L R), or move the
-    // pointer, which stays: reproducible runs for debugging
+    // start) press buttons for 150 ms (A B 1 2 + - H U D L R, X = shake), or
+    // move the pointer, which stays: reproducible runs for debugging
     static const char* script = std::getenv("WIIKIT_PAD");
     static const Clock::time_point t0 = Clock::now();
     static float sx = 0, sy = 0;
@@ -635,6 +650,7 @@ void update_pad() {
                                                     0x8000, 0x0008, 0x0004, 0x0001, 0x0002};
                     const char* n = std::strchr(names, *q);
                     if (n && t >= at && t < at + 0.15) p.buttons |= bits[n - names];
+                    if (*q == 'X' && t >= at && t < at + 0.15) p.shake = true;
                 }
             }
             while (*q == ' ') ++q;
@@ -812,8 +828,21 @@ void video_run(const char* title) {
     for (;;) {
         SDL_Event e;
         bool quit = false;
-        while (SDL_PollEvent(&e))
+        while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
+            // Esc: the port's menu in place of the Wii's Home Button menu.
+            // While it is open the renderer stops, and the game with it as
+            // soon as its FIFO record queue is full.
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE && !e.key.repeat) {
+                const SDL_MessageBoxButtonData buttons[] = {
+                    {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Resume"},
+                    {0, 1, "Quit"}};
+                SDL_MessageBoxData box = {SDL_MESSAGEBOX_INFORMATION, win, base_title.c_str(), "Paused.",
+                                          2, buttons, nullptr};
+                int choice = 0;
+                if (SDL_ShowMessageBox(&box, &choice) && choice == 1) quit = true;
+            }
+        }
         auto now = Clock::now();
         if (opt.quit_after > 0 && std::chrono::duration<double>(now - t0).count() > opt.quit_after) quit = true;
         if (quit) {

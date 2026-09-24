@@ -50,9 +50,9 @@ struct VideoOptions {
 };
 void video_configure(const VideoOptions& o);
 // The host's input as a Wii Remote (read by wpad.cpp): WPAD core button
-// bits; the pointer over the 4:3 screen, -1..1 with y down, when the mouse
-// is inside it.
-struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false; };
+// bits; the pointer over the picture VI shows, -1..1 with y down, when the
+// mouse is inside it; shake while the Remote is to be shaken.
+struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false, shake = false; };
 PadState video_pad();
 
 void write_png(const std::string& path, int w, int h, const uint8_t* rgba);   // RGBA8, top row first

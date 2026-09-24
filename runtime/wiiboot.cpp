@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     ios_init(root.c_str(), nand.c_str());
     os_install();
     wpad_install();
+    rt_game_install();
     if (watch) os_watch(watch);
     char id[7] = {}, name[65] = {};                           // the disc header: game id and name
     std::memcpy(id, host(0x80000000), 6);

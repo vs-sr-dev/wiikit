@@ -5,12 +5,15 @@
 // the public WPAD and KPAD API that games, KPAD itself, Wwise's speaker
 // manager and the Home Button menu call: the Bluetooth stack never starts.
 //
-// Channel 0 holds a Remote driven by the host (video.cpp's PadState: debug
-// keys and the mouse as the pointer, until phase 4 builds the real mapping);
-// the other channels are empty. The Remote is held still, pointing at the
-// screen: gravity along -y, no motion.
+// Channel 0 holds a Remote driven by the host (video.cpp's PadState: the
+// mouse as the pointer, keys for the buttons); the other channels are empty.
+// The Remote is held still, pointing at the screen, gravity along -y,
+// except while it is shaken: then it swings +-2 g along x from one sample to
+// the next. acc_speed, the change of acceleration between samples, is what
+// games compare with a threshold (Victorious: 0.4, over two frames).
 #include "rt.h"
 #include "video.h"
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -31,6 +34,8 @@ void hle_WPADProbe(PPCContext& c) {                  // (chan, u32* type)
 
 uint32_t prev_hold = 0;
 float prev_x = 0, prev_y = 0;
+float prev_acc[3] = {0, -1, 0};
+bool swing = false;
 
 // KPADRead(chan, KPADStatus* samples, len): one sample, newest first
 void hle_KPADRead(PPCContext& c) {
@@ -42,8 +47,17 @@ void hle_KPADRead(PPCContext& c) {
     st32(s + 0x04, p.buttons & ~prev_hold);           // trig
     st32(s + 0x08, prev_hold & ~p.buttons);           // release
     prev_hold = p.buttons;
-    stf(s + 0x10, -1.0f);                             // acc: gravity, the Remote level
-    stf(s + 0x18, 1.0f);                              // acc_value
+    float acc[3] = {0, -1, 0};                        // gravity, the Remote level
+    if (p.shake) acc[0] = (swing = !swing) ? 2.0f : -2.0f;
+    float d2 = 0, a2 = 0;
+    for (int i = 0; i < 3; ++i) {
+        stf(s + 0x0C + 4 * i, acc[i]);                // acc
+        d2 += (acc[i] - prev_acc[i]) * (acc[i] - prev_acc[i]);
+        a2 += acc[i] * acc[i];
+        prev_acc[i] = acc[i];
+    }
+    stf(s + 0x18, std::sqrt(a2));                     // acc_value
+    stf(s + 0x1C, std::sqrt(d2));                     // acc_speed
     float x = p.pointer ? p.x : prev_x, y = p.pointer ? p.y : prev_y;
     stf(s + 0x20, x);                                 // pos
     stf(s + 0x24, y);
@@ -53,7 +67,8 @@ void hle_KPADRead(PPCContext& c) {
     prev_y = y;
     stf(s + 0x34, 1.0f);                              // horizon: level
     stf(s + 0x48, 2.0f);                              // dist: two metres from the sensor bar
-    stf(s + 0x58, -1.0f);                             // acc_vertical
+    stf(s + 0x54, acc[0]);                            // acc_vertical
+    stf(s + 0x58, acc[1]);
     st8(s + 0x5C, WPAD_DEV_CORE);                     // dev_type
     st8(s + 0x5D, 0);                                 // wpad_err: none
     st8(s + 0x5E, p.pointer ? 2 : 0);                 // dpd_valid_fg: both sensor-bar points seen
