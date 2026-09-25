@@ -4,7 +4,7 @@
 // One program per configuration, cached by the renderer under the key built
 // here from the registers that change the code. What is only data (matrices,
 // light parameters, colours, texture sizes) is read at run time: the vertex
-// shader reads the whole of XF memory from a storage buffer, the fragment
+// shader reads the whole of XF memory from a uniform block, the fragment
 // shader gets a uniform block (video.cpp, PSUniforms).
 //
 // The TEV works on integers as the hardware does (after Dolphin): inputs A,
@@ -30,7 +30,10 @@ void w(std::string& s, const char* f, ...) {
 
 // ---- vertex shader ----------------------------------------------------------------------------
 const char* VS_HEAD = R"(#version 450 core
-layout(std430, binding = 0) readonly buffer XFMem { uint xf[]; };
+// a uniform block, not a storage buffer: the renderer rewrites it between
+// draws, and drivers stream uniform updates without waiting for the GPU
+layout(std140, binding = 0) uniform XFMem { uvec4 xf4[0x416]; };
+uint XU(uint a) { return xf4[a >> 2][a & 3u]; }
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_nrm;
 layout(location = 2) in vec3 a_bin;
@@ -47,11 +50,11 @@ layout(location = 12) in uvec4 a_mtx2;
 out vec4 v_col0;
 out vec4 v_col1;
 out vec3 v_tc[8];
-float X(uint a) { return uintBitsToFloat(xf[a]); }
+float X(uint a) { return uintBitsToFloat(XU(a)); }
 vec4 R(uint a) { return vec4(X(a), X(a + 1u), X(a + 2u), X(a + 3u)); }
 vec3 R3(uint a) { return vec3(X(a), X(a + 1u), X(a + 2u)); }
 vec4 C(uint a) {
-    uint c = xf[a];
+    uint c = XU(a);
     return vec4(float(c >> 24), float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
 }
 // light i (XF 0x600 + 16 i): colour at +3, cos attenuation +4, distance
@@ -83,7 +86,7 @@ void main() {
     if (dot(nrm, nrm) > 0.0) nrm = normalize(nrm);
     vec4 clip;
     float p0 = X(0x1020u), p1 = X(0x1021u), p2 = X(0x1022u), p3 = X(0x1023u), p4 = X(0x1024u), p5 = X(0x1025u);
-    if (xf[0x1026u] == 0u) clip = vec4(p0 * pos.x + p1 * pos.z, p2 * pos.y + p3 * pos.z, p4 * pos.z + p5, -pos.z);
+    if (XU(0x1026u) == 0u) clip = vec4(p0 * pos.x + p1 * pos.z, p2 * pos.y + p3 * pos.z, p4 * pos.z + p5, -pos.z);
     else clip = vec4(p0 * pos.x + p1, p2 * pos.y + p3, p4 * pos.z + p5, 1.0);
     // GX clip z runs from -w (near) to 0 (far); the viewport maps it to
     // farZ + zRange * z / w, in units of 2^24
@@ -148,7 +151,7 @@ std::string vertex_shader(const uint32_t* xf, uint8_t vflags) {
             if (dual) {
                 uint32_t pt = xf[0x1050 + i];
                 if (pt >> 8 & 1) s += "        t = normalize(t);\n";
-                w(s, "        uint pm = 0x500u + (xf[0x%Xu] & 63u) * 4u;\n", 0x1050 + i);
+                w(s, "        uint pm = 0x500u + (XU(0x%Xu) & 63u) * 4u;\n", 0x1050 + i);
                 s += "        vec4 t4 = vec4(t, 1.0);\n"
                      "        t = vec3(dot(R(pm), t4), dot(R(pm + 4u), t4), dot(R(pm + 8u), t4));\n";
             }

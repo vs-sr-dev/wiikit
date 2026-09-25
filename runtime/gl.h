@@ -47,6 +47,10 @@
     X(PFNGLNAMEDBUFFERSUBDATAPROC, glNamedBufferSubData)                                            \
     X(PFNGLBINDBUFFERBASEPROC, glBindBufferBase)                                                    \
     X(PFNGLINVALIDATEBUFFERDATAPROC, glInvalidateBufferData)                                        \
+    X(PFNGLMAPNAMEDBUFFERRANGEPROC, glMapNamedBufferRange)                                          \
+    X(PFNGLFENCESYNCPROC, glFenceSync)                                                              \
+    X(PFNGLCLIENTWAITSYNCPROC, glClientWaitSync)                                                    \
+    X(PFNGLDELETESYNCPROC, glDeleteSync)                                                            \
     X(PFNGLCREATEVERTEXARRAYSPROC, glCreateVertexArrays)                                            \
     X(PFNGLBINDVERTEXARRAYPROC, glBindVertexArray)                                                  \
     X(PFNGLVERTEXARRAYVERTEXBUFFERPROC, glVertexArrayVertexBuffer)                                  \

@@ -70,11 +70,19 @@ struct PSUniforms {                                // gxshader.cpp's uniform blo
 // ---- GL objects -------------------------------------------------------------------------------
 SDL_Window* win = nullptr;
 int S = 1;                                         // EFB scale
-GLuint efb_fbo, efb_col, efb_dep, copy_fbo, vao, empty_vao, vbo, quad_ibo, xf_ssbo, ps_ubo, samplers[8];
+GLuint efb_fbo, efb_col, efb_dep, copy_fbo, vao, empty_vao, vbo, quad_ibo, xf_ubo, ps_ubo, samplers[8];
 GLuint copy_prog;
 GLint copy_rect_loc, copy_mode_loc;
 constexpr size_t VBO_CAP = 64u << 20;
 size_t vbo_off = 0;
+// The vertex buffer is a ring mapped once, persistently: draws copy their
+// vertices straight into it. glBufferSubData into a buffer the GPU is still
+// reading makes the driver order a copy between draws, and at thousands of
+// draws a frame the GPU spends its time waiting on those. The ring is fenced
+// in quarters: a quarter is written again only when the GPU is done with it.
+uint8_t* vbo_ptr = nullptr;
+GLsync vbo_fence[4] = {};
+constexpr size_t VBO_QUARTER = VBO_CAP / 4;
 PSUniforms ps_last;
 bool ps_valid = false;
 uint32_t sampler_mode[8][2];
@@ -472,7 +480,7 @@ void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
     else glDisable(GL_CULL_FACE);
 
     if (xf_lo < xf_hi) {
-        glNamedBufferSubData(xf_ssbo, xf_lo * 4, (xf_hi - xf_lo) * 4, &xf[xf_lo]);
+        glNamedBufferSubData(xf_ubo, xf_lo * 4, (xf_hi - xf_lo) * 4, &xf[xf_lo]);
         xf_lo = 0x1058;
         xf_hi = 0;
     }
@@ -500,8 +508,19 @@ void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
                      (bp[0x00] >> 10 & 15) + 1, xf[0x1009] & 3);
     }
     size_t bytes = (size_t)n * sizeof(GVtx);
-    if (vbo_off + bytes > VBO_CAP) { glInvalidateBufferData(vbo); vbo_off = 0; }
-    glNamedBufferSubData(vbo, (GLintptr)vbo_off, (GLsizeiptr)bytes, vtx);
+    // a draw never straddles two quarters; offsets stay whole vertices
+    size_t q = vbo_off / VBO_QUARTER;
+    if ((vbo_off + bytes - 1) / VBO_QUARTER != q) {          // on to the next quarter: fence this one
+        vbo_fence[q] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        q = (q + 1) % 4;
+        vbo_off = (q * VBO_QUARTER + sizeof(GVtx) - 1) / sizeof(GVtx) * sizeof(GVtx);
+        if (vbo_fence[q]) {
+            glClientWaitSync(vbo_fence[q], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+            glDeleteSync(vbo_fence[q]);
+            vbo_fence[q] = nullptr;
+        }
+    }
+    std::memcpy(vbo_ptr + vbo_off, vtx, bytes);
     GLint base = (GLint)(vbo_off / sizeof(GVtx));
     vbo_off += bytes;
     switch (prim) {
@@ -849,7 +868,10 @@ void setup() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glCreateBuffers(1, &vbo);
-    glNamedBufferStorage(vbo, VBO_CAP, nullptr, GL_DYNAMIC_STORAGE_BIT);
+    const GLbitfield map = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    glNamedBufferStorage(vbo, VBO_CAP, nullptr, map);
+    vbo_ptr = static_cast<uint8_t*>(glMapNamedBufferRange(vbo, 0, VBO_CAP, map));
+    if (!vbo_ptr) rt_die("video: the vertex buffer cannot be mapped");
     std::vector<uint32_t> qi;
     for (uint32_t k = 0; k < 0x10000 / 4; ++k)
         for (uint32_t d : {0u, 1u, 2u, 0u, 2u, 3u}) qi.push_back(4 * k + d);
@@ -881,9 +903,9 @@ void setup() {
     }
     glBindVertexArray(vao);
 
-    glCreateBuffers(1, &xf_ssbo);
-    glNamedBufferStorage(xf_ssbo, sizeof xf, nullptr, GL_DYNAMIC_STORAGE_BIT);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, xf_ssbo);
+    glCreateBuffers(1, &xf_ubo);
+    glNamedBufferStorage(xf_ubo, sizeof xf, nullptr, GL_DYNAMIC_STORAGE_BIT);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, xf_ubo);
     glCreateBuffers(1, &ps_ubo);
     glNamedBufferStorage(ps_ubo, sizeof(PSUniforms), nullptr, GL_DYNAMIC_STORAGE_BIT);
     glBindBufferBase(GL_UNIFORM_BUFFER, 1, ps_ubo);
@@ -1026,9 +1048,10 @@ void video_run(const char* title) {
             if (g_vperf_on && cnt.frames > frames_then) {
                 double f = (double)(cnt.frames - frames_then);
                 auto ms = [&](std::atomic<uint64_t>& a) { return (double)a.exchange(0) / 1e6 / f; };
-                double vtx = ms(g_vperf.vtx), tex = ms(g_vperf.tex), wait = ms(g_vperf.wait), draw = ms(g_vperf.draw);
-                rt_log("perf: %.1f fps; frame %.1f ms; game thread: vertices %.1f, textures %.1f, waiting for the renderer %.1f; renderer %.1f ms",
-                       f / s, 1000.0 * s / f, vtx, tex, wait, draw);
+                double vtx = ms(g_vperf.vtx), tex = ms(g_vperf.tex), wait = ms(g_vperf.wait), draw = ms(g_vperf.draw),
+                       pres = ms(g_vperf.present);
+                rt_log("perf: %.1f fps; frame %.1f ms; game thread: vertices %.1f, textures %.1f, waiting for the renderer %.1f; "
+                       "renderer %.1f, presenting %.1f ms", f / s, 1000.0 * s / f, vtx, tex, wait, draw, pres);
             }
             frames_then = cnt.frames;
             t_title = now;
@@ -1058,7 +1081,9 @@ void video_run(const char* title) {
         uint32_t r = retraces.load();
         if (r != seen) {
             seen = r;
+            auto tp = Clock::now();
             present();
+            if (g_vperf_on) g_vperf.present += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - tp).count();
             busy = true;
         }
         if (!busy) SDL_WaitSemaphoreTimeout(wake, 5);

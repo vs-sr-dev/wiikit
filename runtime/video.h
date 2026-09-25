@@ -68,6 +68,7 @@ struct VideoPerf {
     std::atomic<uint64_t> tex{0};       // guest side: decoding textures
     std::atomic<uint64_t> wait{0};      // guest side: waiting for the renderer to take a record
     std::atomic<uint64_t> draw{0};      // the renderer: executing records
+    std::atomic<uint64_t> present{0};   // the renderer: presenting (the swap waits for the GPU)
 };
 extern VideoPerf g_vperf;
 extern bool g_vperf_on;
