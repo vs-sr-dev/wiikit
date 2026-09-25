@@ -13,6 +13,7 @@ imposes on every game, independent of any particular title:
     u8       U8 archives
     dsp      DSP-ADPCM header and decoder
     recomp   static recompilation of Gekko code to C++ (layer 4)
+    profile  names the addresses wiiboot's sampling profiler reports
 
 wiikit/runtime/ holds the C++ side: ppc.h (the CPU model the generated code
 runs against), mem.cpp (guest memory, DOL loading), services_stub.cpp.
