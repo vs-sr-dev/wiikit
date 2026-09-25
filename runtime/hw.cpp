@@ -208,17 +208,20 @@ bool ai_dma_on = false;
 HostClock::time_point ai_dma_next, ai_dma_block_start;
 std::chrono::nanoseconds ai_dma_period{0};
 uint32_t ai_cr = 0;
+uint64_t ai_frames_then = ~0ull;                      // AX frames mixed when the last block started
+bool ai_frame_ready() { return dsp_ucode != Ucode::AX || dsp_frames != ai_frames_then; }
 void ai_dma_block() {                                // a block starts: its samples play, interrupt
     uint16_t ctl = (uint16_t)store_read(0xCC005036, 2);
     uint32_t rate = (ai_cr & 0x40) ? 32000 : 48000;  // AICR bit 6: DMA sample rate
     uint64_t bytes = (uint64_t)(ctl & 0x7FFF) * 32;
     uint32_t addr = (store_read(0xCC005030, 2) << 16 | store_read(0xCC005032, 2)) & 0x1FFFFFE0u;
-    // AX mixes one frame per block, in the guest's AI interrupt. When the
-    // guest was too busy to take it (a heavy load), the AI would play the
-    // previous frame again, a 3 ms buzz: such a block is not played.
-    static uint64_t frames_then = ~0ull, stale = 0;
-    bool fresh = dsp_ucode != Ucode::AX || dsp_frames != frames_then;
-    frames_then = dsp_frames;
+    // AX mixes one frame per block, in the guest's AI interrupt. The clock
+    // waits for it (ai_frame_ready); if the guest stays away past that, the
+    // AI would play the previous frame again, a 3 ms buzz: such a block is
+    // not played.
+    static uint64_t stale = 0;
+    bool fresh = ai_frame_ready();
+    ai_frames_then = dsp_frames;
     if (fresh) audio_play(host(virt(addr)), (uint32_t)bytes / 4, rate);
     else if (++stale % 50 == 1) rt_log("audio: %llu blocks without a new AX frame", (unsigned long long)stale);
     ai_dma_period = std::chrono::nanoseconds(bytes * 1000000000ull / (4ull * rate));
@@ -577,10 +580,13 @@ void ppc_mmio_write(uint32_t a, uint32_t v, int size) {
     if ((a & 0xFFFFF000u) == 0xCC008000u) {
         for (int i = 0; i < size; ++i) gather[gathered++] = (uint8_t)(v >> (8 * (size - 1 - i)));
         if (gathered >= 32) {
-            std::lock_guard<std::recursive_mutex> lk(g_hw);
-            gx_pipe_burst(gather, 32);
+            {
+                std::lock_guard<std::recursive_mutex> lk(g_hw);
+                gx_pipe_burst(gather, 32);
+            }
             gathered -= 32;
             std::memmove(gather, gather + 32, (size_t)gathered);
+            gx_submit_pending();
         }
         return;
     }
@@ -599,9 +605,19 @@ std::chrono::steady_clock::time_point hw_tick() {
     auto now = HostClock::now();
     if (!ai_dma_on || ai_dma_period.count() <= 0) return now + std::chrono::milliseconds(100);
     if (now >= ai_dma_next) {
+        // The next block waits for the guest's mix of it: its AI interrupt
+        // can come late (on the console the CPU takes it at once; here the
+        // game's thread may be decoding a frame's vertices), and a block
+        // without its frame is a gap in the sound. The host's audio queue
+        // absorbs the wait.
+        if (!ai_frame_ready() && now - ai_dma_next < std::chrono::milliseconds(50))
+            return now + std::chrono::microseconds(250);
         ai_dma_block();
+        // a late block is followed by the next as soon as it is mixed, back
+        // on the schedule, so the AI keeps real time; a long stall (the game
+        // stopped mixing) starts it afresh
         ai_dma_next += ai_dma_period;
-        if (ai_dma_next <= now) ai_dma_next = now + ai_dma_period;
+        if (now - ai_dma_next > std::chrono::milliseconds(100)) ai_dma_next = now + ai_dma_period;
         os_raise();
     }
     return ai_dma_next;

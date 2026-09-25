@@ -926,14 +926,18 @@ void video_configure(const VideoOptions& o) { opt = o; S = std::max(1, o.scale);
 VideoPerf g_vperf;
 bool g_vperf_on = std::getenv("WIIKIT_PERF") != nullptr;
 
-void video_submit(std::vector<uint8_t>& rec, int frames) {
+bool video_submit(std::vector<uint8_t>& rec, int frames, int wait_ms) {
     auto t0 = Clock::now();
     std::unique_lock<std::mutex> lk(qmx);
     // frames in flight: each one queued is 33 ms more between what the game
     // decides and what is seen, and one less the game and the renderer can
     // work on side by side
-    q_space.wait(lk, [] { return q_frames < opt.frames_ahead && q.size() < 256; });
+    auto room = [] { return q_frames < opt.frames_ahead && q.size() < 256; };
+    bool ok = true;
+    if (wait_ms < 0) q_space.wait(lk, room);
+    else ok = q_space.wait_for(lk, std::chrono::milliseconds(wait_ms), room);
     if (g_vperf_on) g_vperf.wait += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+    if (!ok) return false;
     q.push_back(Chunk{std::move(rec), frames});
     q_frames += frames;
     // a buffer the renderer is done with, capacity and pages kept: fresh
@@ -947,6 +951,7 @@ void video_submit(std::vector<uint8_t>& rec, int frames) {
     }
     lk.unlock();
     if (wake) SDL_SignalSemaphore(wake);
+    return true;
 }
 
 void video_set_xfb(uint32_t a) { xfb_addr.store(a); }

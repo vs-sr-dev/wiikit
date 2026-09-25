@@ -90,10 +90,13 @@ uint8_t* grow(size_t n) {
     return rec.data() + o;
 }
 template <class T> void put(T v) { std::memcpy(grow(sizeof v), &v, sizeof v); }
+// The record is handed over after the burst, outside the hardware lock
+// (gx_submit_pending): video_submit may wait for the renderer, and while it
+// waits the clock thread must still start the AI's audio blocks on time.
+bool submit_pending = false;
 void flush(bool force) {
     if (rec.empty() || (!force && rec.size() < (1u << 20))) return;
-    video_submit(rec, rec_frames);
-    rec_frames = 0;
+    submit_pending = true;
 }
 
 uint64_t hash_mem(const uint8_t* p, size_t n) {
@@ -560,6 +563,21 @@ void feed(const uint8_t* b, int n) {
 }  // namespace
 
 void gx_init() { video = video_enabled(); }
+
+// While the renderer is behind, the game's thread waits here; the console's
+// CPU never waits for its GP, and would take its interrupts meanwhile: the
+// AI's, which start each audio frame's mix, above all. So does this wait.
+// A handler may switch guest threads, and another thread may hand the
+// record over in the meantime.
+void gx_submit_pending() {
+    if (!submit_pending) return;
+    submit_pending = false;
+    while (!rec.empty()) {
+        int frames = rec_frames;
+        if (video_submit(rec, frames, 1)) { rec_frames = 0; break; }
+        if (t_ppc && g_ppc_pending.load(std::memory_order_relaxed)) ppc_poll(*t_ppc);
+    }
+}
 
 // The write-gather pipe: CPU stores to 0xCC008000 collect in a 32-byte
 // buffer, and reach the FIFO in memory as 32-byte bursts, as on the console

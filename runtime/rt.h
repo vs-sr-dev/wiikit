@@ -47,6 +47,7 @@ void os_profile();                                // WIIKIT_PROFILE: sample the 
 // ---- GX (gx.cpp) -----------------------------------------------------------------
 void gx_init();                                   // after video_configure
 void gx_report();                                 // command stream statistics
+void gx_submit_pending();                         // after a burst, outside g_hw: hand the record to the renderer
 
 // ---- the hardware (hw.cpp) -----------------------------------------------------------
 void hw_init();

@@ -6,7 +6,8 @@
 // and the guest can be late with a frame. The stream starts, and restarts
 // after running dry, only with kTarget of sound queued, a cushion against
 // that jitter; after that the stream's playback speed is nudged (at most
-// 2%, not audible) to hold the queue at kTarget. What is heard stays about
+// 0.5%: the clocks drift by far less, and more is heard as pitch) to hold
+// the queue at kTarget. What is heard stays about
 // kTarget behind what the game counts: that matters for the rhythm game,
 // whose beats come from the audio clock. Past kMaxQueue a block is dropped.
 //
@@ -110,7 +111,7 @@ void audio_play(const uint8_t* be_rl, uint32_t frames, uint32_t rate) {
     }
     // hold the queue at kTarget: play faster when it grows, slower when it shrinks
     smoothed += (q - smoothed) * 0.01;
-    float ratio = (float)std::clamp(1.0 + (smoothed - kTarget) * 0.5, 0.98, 1.02);
+    float ratio = (float)std::clamp(1.0 + (smoothed - kTarget) * 0.25, 0.995, 1.005);
     SDL_SetAudioStreamFrequencyRatio(stream, ratio);
     static uint64_t n = 0;
     if (dbg && ++n % 1000 == 0) rt_log("audio: queue %.1f ms (smoothed %.1f), speed %.4f", q * 1000, smoothed * 1000, ratio);

@@ -37,7 +37,10 @@ enum : uint8_t { VTX_COL0 = 1, VTX_COL1 = 2, VTX_NRM = 4, VTX_NBT = 8 };
 
 // video.cpp
 bool video_enabled();                       // false with --no-video: the stream is parsed only
-void video_submit(std::vector<uint8_t>& rec, int frames);   // takes the record, leaves it empty
+// Takes the record and leaves it empty; waits while the renderer has
+// frames_ahead frames queued, at most wait_ms (-1: as long as it takes).
+// False if the time ran out: the record is left as it was.
+bool video_submit(std::vector<uint8_t>& rec, int frames, int wait_ms = -1);
 void video_set_xfb(uint32_t top_field_addr); // VI: the XFB being scanned out (physical)
 void video_retrace();                        // VI: a vertical retrace happened
 void video_set_lines(uint32_t lines);        // VI: lines of picture scanned out (of 480 for NTSC)
