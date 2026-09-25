@@ -680,7 +680,7 @@ const char* DEFAULT_KEYS =
     "# Space, Tab, Backspace, Left Shift, Up, Down, Left, Right, Keypad Enter, F1..F10...\n"
     "# Mouse buttons: Mouse Left, Mouse Right, Mouse Middle, Mouse X1, Mouse X2; Drag Left, Drag Right,\n"
     "# Drag Middle: the button held and the mouse moving fast (a swing: Shake = Drag Left).\n"
-    "# Fixed: Esc (the pause box), F11 and Alt+Enter (fullscreen). Delete the file for the defaults.\n"
+    "# Fixed: Esc (the pause box), F11 and Alt+Enter (fullscreen), F12 (trace a frame's GX commands). Delete the file for the defaults.\n"
     "A     = Return, Keypad Enter, Mouse Left\n"
     "B     = Backspace, Mouse Right\n"
     "Up    = W, Up\n"
@@ -991,6 +991,16 @@ bool video_submit(std::vector<uint8_t>& rec, int frames, int wait_ms) {
 
 void video_set_xfb(uint32_t a) { xfb_addr.store(a); }
 void video_set_lines(uint32_t n) { vi_lines.store(n); }
+std::atomic<bool> want_relative{false};
+std::mutex motion_mx;
+float motion_x = 0, motion_y = 0;
+void video_set_relative_mouse(bool on) { want_relative = on; }
+void video_take_mouse_motion(float& dx, float& dy) {
+    std::lock_guard<std::mutex> lk(motion_mx);
+    dx = motion_x; dy = motion_y;
+    motion_x = motion_y = 0;
+}
+
 PadState video_pad() {
     std::lock_guard<std::mutex> lk(pad_mx);
     return pad;
@@ -1056,6 +1066,9 @@ void video_run(const char* title) {
                  ((e.key.scancode == SDL_SCANCODE_RETURN || e.key.scancode == SDL_SCANCODE_KP_ENTER) &&
                   (e.key.mod & SDL_KMOD_ALT))))
                 SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
+            // F12: the next frame's GX commands to a file (debugging, as WIIKIT_GXTRACE)
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat)
+                gx_trace_next_frame();
             // Esc: the port's menu in place of the Wii's Home Button menu.
             // While it is open the renderer stops, and the game with it as
             // soon as its FIFO record queue is full.
@@ -1066,6 +1079,7 @@ void video_run(const char* title) {
                 SDL_MessageBoxData box = {SDL_MESSAGEBOX_INFORMATION, win, base_title.c_str(), "Paused.",
                                           2, buttons, nullptr};
                 int choice = 0;
+                SDL_SetWindowRelativeMouseMode(win, false);
                 if (SDL_ShowMessageBox(&box, &choice) && choice == 1) quit = true;
             }
         }
@@ -1080,6 +1094,16 @@ void video_run(const char* title) {
             std::_Exit(0);
         }
         update_pad();
+        {
+            bool rel = want_relative && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS);
+            if (rel != SDL_GetWindowRelativeMouseMode(win)) SDL_SetWindowRelativeMouseMode(win, rel);
+            float dx = 0, dy = 0;
+            SDL_GetRelativeMouseState(&dx, &dy);
+            if (rel) {
+                std::lock_guard<std::mutex> lk(motion_mx);
+                motion_x += dx; motion_y += dy;
+            }
+        }
         if (now - t_title >= std::chrono::seconds(1)) {
             double s = std::chrono::duration<double>(now - t_title).count();
             char buf[256];

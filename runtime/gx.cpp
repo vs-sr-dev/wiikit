@@ -18,6 +18,7 @@
 // cached by content, and EFB copies remembered by address so that a texture
 // read from there is the copy, kept on the host GPU.
 #include "rt.h"
+#include <atomic>
 #include <chrono>
 #include "gxtex.h"
 #include "video.h"
@@ -44,10 +45,16 @@ std::vector<uint8_t> tmem(1 << 20);                // texture memory: only palet
 
 struct Stats { uint64_t cmds, draws, verts, dls, copies, frames, done, uploads; } st;
 
-// WIIKIT_GXTRACE=N: every command of frame N (counted in XFB copies) to gxtrace_N.txt
+// WIIKIT_GXTRACE=N: every command of frame N (counted in XFB copies) to
+// gxtrace_N.txt; F12 in the window asks for the next frame the same way
+std::atomic<bool> trace_next{false};
 FILE* trace_file() {
     static long want = std::getenv("WIIKIT_GXTRACE") ? std::atol(std::getenv("WIIKIT_GXTRACE")) : -1;
     static FILE* f = nullptr;
+    if (!f && trace_next.exchange(false)) {
+        want = (long)st.frames + 1;
+        rt_log("gx: tracing frame %ld to gxtrace_%ld.txt", want, want);
+    }
     if (want < 0 || (long)st.frames != want) {
         if (f && (long)st.frames > want) { std::fclose(f); f = nullptr; want = -1; }
         return nullptr;
@@ -568,6 +575,8 @@ void feed(const uint8_t* b, int n) {
 
 }  // namespace
 
+void gx_trace_next_frame() { trace_next = true; }
+
 void gx_init() { video = video_enabled(); }
 
 // While the renderer is behind, the game's thread waits here; the console's
@@ -592,14 +601,19 @@ void gx_submit_pending() {
 // The write-gather pipe: CPU stores to 0xCC008000 collect in a 32-byte
 // buffer, and reach the FIFO in memory as 32-byte bursts, as on the console
 // (the SDK's GXFlush pads the last one out). The stores themselves take no
-// lock (hw.cpp); a burst does.
+// lock (hw.cpp); a burst does. The PI's pointers are physical addresses of
+// either memory (MEM2 from 0x10000000: games record display lists there), with
+// the write pointer's wrap flag in bit 29. The pointer wraps when it reaches
+// the end, not when it is past it: GXRedirectWriteGatherPipe sets base 0, end
+// 0x04000000 and points the pipe at a buffer that may lie in MEM2, above it.
+constexpr uint32_t PI_ADDR = 0x1FFFFFFFu, PI_WRAP = 0x20000000u;
 void gx_pipe_burst(const uint8_t* b, int n) {
     for (int i = 0; i < n; ++i) {
-        uint32_t a = pi_wptr & 0x03FFFFFFu;
+        uint32_t a = pi_wptr & PI_ADDR;
         *host(virt(a)) = b[i];
         ++a;
-        if (pi_end && a >= (pi_end & 0x03FFFFFFu)) pi_wptr = (pi_base & 0x03FFFFFFu) | 0x20000000u;
-        else pi_wptr = (pi_wptr & 0x20000000u) | a;
+        if (pi_end && a == (pi_end & PI_ADDR)) pi_wptr = (pi_base & PI_ADDR) | PI_WRAP;
+        else pi_wptr = (pi_wptr & PI_WRAP) | a;
     }
     if (linked()) feed(b, n);
 }
@@ -615,7 +629,7 @@ void gx_pi_fifo_write(uint32_t off, uint32_t v) {
 
 uint32_t gx_cp_read(uint32_t off, int size) {
     auto r16 = [](uint32_t o) -> uint16_t {
-        uint32_t wp = pi_wptr & 0x03FFFFFFu;
+        uint32_t wp = pi_wptr & PI_ADDR;
         switch (o) {
         case 0x00:                                       // underflow, GP read idle, command idle
             return (uint16_t)(0x0E | (bp_reached() ? 0x10 : 0));

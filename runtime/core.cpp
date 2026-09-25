@@ -3,11 +3,14 @@
 // symbol names and crash reports.
 #include "rt.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 extern const PPCFuncEntry g_ppc_funcs[];
@@ -27,7 +30,37 @@ PPCFunc ppc_lookup(uint32_t addr) {
     return lo < g_ppc_nfuncs && g_ppc_funcs[lo].addr == addr ? g_ppc_funcs[lo].fn : nullptr;
 }
 
+// WIIKIT_ICALLS=1: indirect calls (bctrl, blrl: virtual calls, callbacks, a
+// script engine's natives) counted by target, the most called reported every
+// five seconds with their names. A window on code that runs through tables.
+namespace {
+struct ICalls {
+    std::mutex mx;
+    std::unordered_map<uint32_t, uint64_t> n;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+};
+ICalls* icalls() {
+    static ICalls* ic = std::getenv("WIIKIT_ICALLS") ? new ICalls : nullptr;
+    return ic;
+}
+void count_icall(ICalls& ic, uint32_t addr) {
+    std::lock_guard<std::mutex> lk(ic.mx);
+    ++ic.n[addr];
+    auto now = std::chrono::steady_clock::now();
+    if (now - ic.last < std::chrono::seconds(5)) return;
+    ic.last = now;
+    std::vector<std::pair<uint64_t, uint32_t>> top;
+    for (auto& [a, k] : ic.n) top.push_back({k, a});
+    std::sort(top.rbegin(), top.rend());
+    std::fprintf(stderr, "icalls: %zu targets in 5 s\n", top.size());
+    for (size_t i = 0; i < top.size() && i < 40; ++i)
+        std::fprintf(stderr, "  %10llu  %s\n", (unsigned long long)top[i].first, rt_name(top[i].second).c_str());
+    ic.n.clear();
+}
+}  // namespace
+
 void ppc_call_indirect(PPCContext& c, uint32_t addr) {
+    if (ICalls* ic = icalls()) count_icall(*ic, addr);
     PPCFunc f = ppc_lookup(addr);
     if (!f) {
         std::fprintf(stderr, "wiikit: indirect call to %s, not a function\n", rt_name(addr).c_str());

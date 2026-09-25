@@ -12,12 +12,24 @@
 // interrupt when its enable (IY1/IY2) is set. A request may stay pending
 // (STM's event hook) and be answered later.
 //
+// A request is carried out at once, but its reply is delivered no sooner than
+// kReplyLatency later (by the clock thread, or at the next interrupt check):
+// on a console IOS takes at least that long, and the SDK relies on it. An
+// IOS_*Async call returns before its callback runs; a game that marks the
+// operation pending after the call returns (its result, then its state)
+// would overwrite a completion delivered inside the call, and wait forever.
+// Once the processor idles every guest thread is waiting, the caller of an
+// async call past it: replies are then due at once, so a synchronous call
+// (the disc's reads) costs no latency.
+//
 // Devices so far: /dev/di (the disc, from the extracted tree), /dev/fs and
 // file paths (NAND, on a host folder), /dev/es (title identity, ticket and
 // TMD views), /dev/stm/immediate and /dev/stm/eventhook. Anything else fails
 // to open, and every call a device does not know is logged.
 #include "disc.h"
 #include "rt.h"
+#include <algorithm>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <map>
@@ -39,7 +51,11 @@ struct Ctrl {
     uint32_t ppc() const { return iy2 << 5 | iy1 << 4 | x2 << 3 | y1 << 2 | y2 << 1 | (uint32_t)x1; }
 } ctrl;
 uint32_t ppc_msg = 0, arm_msg = 0, irq_flags = 0, irq_mask = IRQ_IPC;
-std::deque<uint32_t> requests, replies;
+using Clock = std::chrono::steady_clock;
+constexpr auto kReplyLatency = std::chrono::microseconds(50);
+struct Reply { uint32_t addr; Clock::time_point due; };
+std::deque<uint32_t> requests;
+std::deque<Reply> replies;
 
 void update_irq() {
     if ((ctrl.y1 && ctrl.iy1) || (ctrl.y2 && ctrl.iy2)) irq_flags |= IRQ_IPC;
@@ -350,7 +366,7 @@ void reply(uint32_t addr, int32_t result) {
     wr32(addr, 8);
     wr32(addr + 4, (uint32_t)result);
     wr32(addr + 8, cmd);
-    replies.push_back(addr);
+    replies.push_back({addr, Clock::now() + kReplyLatency});
 }
 
 int32_t execute(uint32_t addr) {
@@ -365,7 +381,10 @@ int32_t execute(uint32_t addr) {
             return IPC_ENOENT;
         }
         int32_t r = d->open(a1);
-        if (r < 0) return r;
+        if (r < 0) {
+            if (g_mmio_log) rt_log("ios: open %s -> %d", path.c_str(), r);
+            return r;
+        }
         for (int i = 0; i < 32; ++i)
             if (!g_fds[i]) {
                 g_fds[i] = std::move(d);
@@ -381,7 +400,11 @@ int32_t execute(uint32_t addr) {
     case 3: return d.read(virt(a0), a1);
     case 4: return d.write(virt(a0), a1);
     case 5: return d.seek((int32_t)a0, a1);
-    case 6: return d.ioctl(a0, a1 ? virt(a1) : 0, a2, a3 ? virt(a3) : 0, a4, addr);
+    case 6: {                                     // --mmio-log: each call, its input as text, its result
+        int32_t r = d.ioctl(a0, a1 ? virt(a1) : 0, a2, a3 ? virt(a3) : 0, a4, addr);
+        if (g_mmio_log) rt_log("ios: fd %u ioctl %X in %s -> %d", fd, a0, a1 ? guest_cstr(virt(a1), 64).c_str() : "", r);
+        return r;
+    }
     case 7: {
         std::vector<Vec> in, io;
         uint32_t vec = virt(a3);
@@ -389,7 +412,10 @@ int32_t execute(uint32_t addr) {
             uint32_t p = rd32(vec + 8 * i), n = rd32(vec + 8 * i + 4);
             (i < a1 ? in : io).push_back({p ? virt(p) : 0, n});
         }
-        return d.ioctlv(a0, in, io, addr);
+        int32_t r = d.ioctlv(a0, in, io, addr);
+        if (g_mmio_log) rt_log("ios: fd %u ioctlv %X (%zu in) %s -> %d", fd, a0, in.size(),
+                               !in.empty() && in[0].addr ? guest_cstr(in[0].addr, 64).c_str() : "", r);
+        return r;
     }
     }
     rt_log("ios: command %u unknown", cmd);
@@ -409,8 +435,8 @@ void update() {
         if (r != PENDING) reply(addr, r);
         return;
     }
-    if (!replies.empty() && ready()) {
-        arm_msg = replies.front() & 0x7FFFFFFFu;      // physical
+    if (!replies.empty() && ready() && Clock::now() >= replies.front().due) {
+        arm_msg = replies.front().addr & 0x7FFFFFFFu; // physical
         replies.pop_front();
         ctrl.y1 = true;
         update_irq();
@@ -458,6 +484,17 @@ uint32_t ios_ipc_read(uint32_t reg) {
     case 2: return arm_msg;
     }
     return 0;
+}
+
+void ios_idle() {
+    auto now = Clock::now();
+    for (Reply& r : replies) r.due = std::min(r.due, now);
+    update();
+}
+
+Clock::time_point ios_tick() {
+    update();
+    return replies.empty() ? Clock::time_point::max() : replies.front().due;
 }
 
 void ios_irq_flag_clear(uint32_t v) {

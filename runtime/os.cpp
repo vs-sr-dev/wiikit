@@ -435,6 +435,7 @@ void os_raise() {
 // Nothing but an interrupt can end the loop: wait for one (with a 1 ms
 // bound, in case a line is raised some other way), then deliver it.
 void ppc_idle(PPCContext& c) {
+    if (c.msr & MSR_EE) hw_cpu_idle();
     if (!g_ppc_pending.load(std::memory_order_relaxed) && (c.msr & MSR_EE)) {
         g_idle_waiting.store(true, std::memory_order_seq_cst);
         if (!g_ppc_pending.load(std::memory_order_seq_cst)) idle_wait();

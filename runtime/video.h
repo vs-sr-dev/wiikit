@@ -67,6 +67,11 @@ void video_configure(const VideoOptions& o);
 // sign of KPAD's acc.z then, while a game's expectation is found out)
 struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false, shake = false; int tilt = 0; };
 PadState video_pad();
+// Relative mouse, for a port that turns the mouse's motion into a stick or a
+// view: the cursor is captured while the window has the focus (released for
+// the pause box), and the motion is summed until taken.
+void video_set_relative_mouse(bool on);
+void video_take_mouse_motion(float& dx, float& dy);
 
 // WIIKIT_PERF=1: where a frame's time goes, reported every second by the
 // renderer. Nanoseconds, summed since the last report.

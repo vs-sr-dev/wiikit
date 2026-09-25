@@ -69,6 +69,7 @@ uint32_t ppc_mfdec();
 void     ppc_lswx(PPCContext& c, int rd, uint32_t ea, uint32_t n);
 void     ppc_stswx(PPCContext& c, int rs, uint32_t ea, uint32_t n);
 uint32_t ppc_lc_dma(uint32_t dma_u, uint32_t dma_l);        // mtspr DMA_L: the locked cache's DMA; returns DMA_L
+void     ppc_wpar_write(uint32_t wpar);                     // mtspr WPAR: the gather buffer's partial burst dropped
 extern uint32_t g_ppc_spr[1024];                            // the processor's own SPRs (HID0/1/2/4, WPAR, DMA)
 
 // Replace a named function (from the hook list the code was generated with);

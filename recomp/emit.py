@@ -314,6 +314,8 @@ def emit(ins, addr, fn):
             return [f"ppc_mtdec(c.r[{S}]);"]
         if n in (284, 285):               # TBL, TBU
             return [f"ppc_mttb({n - 284}, c.r[{S}]);"]
+        if n == 921:                      # WPAR: points the write-gather pipe, and empties it
+            return [f"g_ppc_spr[921] = c.r[{S}]; ppc_wpar_write(c.r[{S}]);"]
         if n == 923:                      # DMA_L: starts the locked cache's DMA
             return [f"g_ppc_spr[923] = ppc_lc_dma(g_ppc_spr[922], c.r[{S}]);"]
         if n in _GLOBAL_SPRS:

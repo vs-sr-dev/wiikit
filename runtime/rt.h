@@ -47,6 +47,7 @@ void os_profile();                                // WIIKIT_PROFILE: sample the 
 // ---- GX (gx.cpp) -----------------------------------------------------------------
 void gx_init();                                   // after video_configure
 void gx_report();                                 // command stream statistics
+void gx_trace_next_frame();                       // the next frame's commands to gxtrace_N.txt (F12)
 void gx_submit_pending();                         // after a burst, outside g_hw: hand the record to the renderer
 void gx_draw_done_reached();                      // the renderer: the game's draw-done point is drawn
 void hw_run_locked(void (*fn)());                 // run fn holding the hardware lock
@@ -90,3 +91,5 @@ void ios_irq_flag_clear(uint32_t v);               // 0xCD000030
 void ios_irq_mask_write(uint32_t v);               // 0xCD000034
 uint32_t ios_irq_flags();
 uint32_t ios_irq_mask();
+std::chrono::steady_clock::time_point ios_tick();  // replies now due delivered; when the next is
+void hw_cpu_idle();                               // the processor idles: IOS replies are due at once

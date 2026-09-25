@@ -593,6 +593,12 @@ uint32_t ppc_mmio_read(uint32_t a, int size) {
 uint8_t gather[64];
 int gathered = 0;
 
+// Writing WPAR resets the gather buffer, as on the 750CL (and in Dolphin):
+// bytes short of a burst are dropped. GXRedirectWriteGatherPipe pads the pipe
+// with zeros, then writes WPAR before pointing it at a buffer in memory; the
+// padding's remainder must not land at the start of that buffer.
+void ppc_wpar_write(uint32_t) { gathered = 0; }
+
 void ppc_mmio_write(uint32_t a, uint32_t v, int size) {
     if ((a & 0xFFFFF000u) == 0xCC008000u) {
         for (int i = 0; i < size; ++i) gather[gathered++] = (uint8_t)(v >> (8 * (size - 1 - i)));
@@ -614,11 +620,25 @@ void ppc_mmio_write(uint32_t a, uint32_t v, int size) {
 
 bool hw_external_pending() {
     std::lock_guard<std::recursive_mutex> lk(g_hw);
+    ios_tick();
     return (pi_cause() & pi_mask & ~PI_RSWST) != 0;
 }
 
+std::chrono::steady_clock::time_point ai_tick();
+void ios_idle();
+
+void hw_cpu_idle() {
+    std::lock_guard<std::recursive_mutex> lk(g_hw);
+    ios_idle();
+}
+
+// the clock thread's device work: IPC replies falling due, AI blocks
 std::chrono::steady_clock::time_point hw_tick() {
     std::lock_guard<std::recursive_mutex> lk(g_hw);
+    return std::min(ios_tick(), ai_tick());
+}
+
+std::chrono::steady_clock::time_point ai_tick() {
     auto now = HostClock::now();
     if (!ai_dma_on || ai_dma_period.count() <= 0) return now + std::chrono::milliseconds(100);
     if (now >= ai_dma_next) {

@@ -16,3 +16,4 @@ uint64_t ppc_timebase() { return 0; }
 void ppc_mttb(int, uint32_t) {}
 void ppc_mtdec(uint32_t) {}
 uint32_t ppc_mfdec() { return 0x7FFFFFFFu; }
+void ppc_wpar_write(uint32_t) {}
