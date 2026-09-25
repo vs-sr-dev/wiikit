@@ -585,6 +585,7 @@ void exec(const std::vector<uint8_t>& data) {
         case VC_TEXBIND: { uint8_t m = rd<uint8_t>(p); map_src[m] = rd<uint32_t>(p); break; }
         case VC_TEXEFB: { uint8_t m = rd<uint8_t>(p); map_src[m] = 1ull << 32 | rd<uint32_t>(p); break; }
         case VC_FRAME: break;
+        case VC_DRAWDONE: gx_draw_done_reached(); break;
         default: rt_die("video: bad record byte %02X", p[-1]);
         }
     }

@@ -19,6 +19,7 @@
 #include "rt.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 
 namespace {
 
@@ -276,10 +277,22 @@ void process_voice(PB& pb) {
     }
 }
 
+uint64_t ax_frame = 0;
+FILE* ax_trace() {                                   // debugging: WIIKIT_AXTRACE=first_frame:count
+    static const char* e = std::getenv("WIIKIT_AXTRACE");
+    static long first = e ? std::atol(e) : -1, count = e && std::strchr(e, ':') ? std::atol(std::strchr(e, ':') + 1) : 0;
+    static FILE* f = e ? std::fopen("axtrace.txt", "w") : nullptr;
+    return f && (long)ax_frame >= first && (long)ax_frame < first + count ? f : nullptr;
+}
 void process_pbs(uint32_t addr) {
     PB pb;
     for (int guard = 0; addr && guard < 1024; ++guard) {
         read_pb(addr, pb);
+        if (FILE* f = ax_trace(); f && pb.w[RUNNING] == 1)
+            std::fprintf(f, "%llu %08X cur %08X end %08X loop %08X mc %08X L %04X/%04X R %04X/%04X ve %04X/%04X frac %04X last %d %d %d %d yn %d %d ps %02X\n",
+                         (unsigned long long)ax_frame, addr, pb.u32(CUR_ADDR), pb.u32(END_ADDR), pb.u32(LOOP_ADDR), pb.u32(MIXER_CONTROL),
+                         pb.w[MIXER], pb.w[MIXER + 1], pb.w[MIXER + 2], pb.w[MIXER + 3], pb.w[VE], pb.w[VE + 1], pb.w[SRC_FRAC],
+                         pb.s(SRC_LAST), pb.s(SRC_LAST + 1), pb.s(SRC_LAST + 2), pb.s(SRC_LAST + 3), pb.s(YN1), pb.s(YN2), pb.w[PRED_SCALE]);
         process_voice(pb);
         write_pb(addr, pb);
         addr = pb.u32(NEXT);
@@ -445,7 +458,7 @@ void ax_command_list(uint32_t addr) {
             output_remotes(ad);
             break;
         }
-        case 0x0E: return;
+        case 0x0E: ++ax_frame; return;
         default:
             rt_log("ax: unknown command %04X in the list at %08X", cmd, addr);
             return;

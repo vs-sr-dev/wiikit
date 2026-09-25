@@ -29,7 +29,7 @@ uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2
 
 }  // namespace
 
-uint32_t boot_disc(const char* extract_dir) {
+uint32_t boot_disc(const char* extract_dir, bool eurgb60) {
     std::string root = extract_dir;
     if (!disc_open(extract_dir)) rt_die("%s: no sys/boot.bin and sys/fst.bin", extract_dir);
     uint32_t entry = mem_load_dol((root + "/sys/main.dol").c_str());
@@ -54,14 +54,15 @@ uint32_t boot_disc(const char* extract_dir) {
     st32(0x80000038, fst_addr);                    // FST
     st32(0x8000003C, be32(&boot[0x42C]) << 2);     // FST maximum size
     // video: the disc's region, as Dolphin boots it. A PAL game asks VI for
-    // PAL, and the SDK refuses a switch from NTSC; SYSCONF's IPL.E60 then
-    // lets it choose 60 Hz. The region is the disc's u32 at 0x4E000
+    // PAL, and the SDK refuses a switch from NTSC. With SYSCONF's IPL.E60 set
+    // the IPL leaves the TV mode at EuRGB60 (5), which is what games read
+    // (VIGetTvFormat) to choose 60 Hz over 50. The region is the disc's u32 at 0x4E000
     // (disc/region.bin: 0 Japan, 1 USA, 2 Europe, 4 Korea), else the game
     // id's fourth letter (E, J, K, W: NTSC; the others PAL)
     std::vector<uint8_t> reg = slurp(root + "/disc/region.bin");
     const bool pal = reg.size() >= 4 ? be32(reg.data()) == 2 :
                      !std::strchr("EJKW", boot[3]);
-    st32(0x800000CC, pal ? 1 : 0);                 // 1 PAL, 0 NTSC
+    st32(0x800000CC, pal ? (eurgb60 ? 5 : 1) : 0);   // the TV mode: 0 NTSC, 1 PAL, 5 EuRGB60
     hw_vi_preset(pal);
     st32(0x800000F0, 0x01800000);                  // simulated memory size
     st32(0x800000F4, bi2_addr);

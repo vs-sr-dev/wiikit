@@ -17,6 +17,8 @@
 //   TEXBIND u8 map, u32 id
 //   TEXEFB  u8 map, u32 address: the EFB copy made to that address
 //   FRAME   (an XFB copy was recorded: one frame)
+//   DRAWDONE (the game asked to know when the GP has drawn everything so
+//            far: the renderer, reaching it, raises PE's finish interrupt)
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -32,7 +34,7 @@ struct GVtx {
 };
 static_assert(sizeof(GVtx) == 132, "GVtx layout");
 
-enum : uint8_t { VC_BP = 1, VC_XF, VC_DRAW, VC_TEXUP, VC_TEXBIND, VC_TEXEFB, VC_FRAME };
+enum : uint8_t { VC_BP = 1, VC_XF, VC_DRAW, VC_TEXUP, VC_TEXBIND, VC_TEXEFB, VC_FRAME, VC_DRAWDONE };
 enum : uint8_t { VTX_COL0 = 1, VTX_COL1 = 2, VTX_NRM = 4, VTX_NBT = 8 };
 
 // video.cpp

@@ -80,8 +80,8 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 1 << 16);
     if (!mem_init()) rt_die("cannot reserve the guest address space");
     if (vo.keys.empty()) vo.keys = root + "/../keys.txt";
-    uint32_t entry = boot_disc(root.c_str());
     vo.widescreen = sysconf_prepare(nand.c_str(), so);
+    uint32_t entry = boot_disc(root.c_str(), g_sysconf_eurgb60);
     video_configure(vo);
     gx_init();
     hw_init();

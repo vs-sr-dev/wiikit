@@ -129,6 +129,8 @@ uint8_t get_byte(const std::vector<Item>& items, const char* name, uint8_t fallb
 
 }  // namespace
 
+bool g_sysconf_eurgb60 = true;
+
 bool sysconf_prepare(const char* nand_root, const SysconfOptions& o) {
     std::string dir = std::string(nand_root) + "/shared2/sys", path = dir + "/SYSCONF";
     fs::create_directories(dir);
@@ -148,6 +150,7 @@ bool sysconf_prepare(const char* nand_root, const SysconfOptions& o) {
         if (!out || std::fwrite(f.data(), 1, f.size(), out) != f.size()) rt_die("sysconf: cannot write %s", path.c_str());
         std::fclose(out);
     }
+    g_sysconf_eurgb60 = get_byte(items, "IPL.E60", 1) == 1;
     bool wide = get_byte(items, "IPL.AR", 0) == 1;
     rt_log("sysconf: %s, language %u", wide ? "16:9" : "4:3", get_byte(items, "IPL.LNG", 1));
     return wide;

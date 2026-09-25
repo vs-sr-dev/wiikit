@@ -48,6 +48,8 @@ void os_profile();                                // WIIKIT_PROFILE: sample the 
 void gx_init();                                   // after video_configure
 void gx_report();                                 // command stream statistics
 void gx_submit_pending();                         // after a burst, outside g_hw: hand the record to the renderer
+void gx_draw_done_reached();                      // the renderer: the game's draw-done point is drawn
+void hw_run_locked(void (*fn)());                 // run fn holding the hardware lock
 
 // ---- the hardware (hw.cpp) -----------------------------------------------------------
 void hw_init();
@@ -55,6 +57,7 @@ void hw_vi_preset(bool pal);                        // VI as the IPL leaves it
 bool hw_load_fonts(const char* dir);               // font_japanese.bin, font_western.bin
 bool hw_external_pending();                        // PI cause & mask
 void hw_vi_retrace();                              // called at each vertical retrace
+std::chrono::nanoseconds hw_vi_field_period();     // from the timing VI is programmed with
 std::chrono::steady_clock::time_point hw_tick();   // timed device events; returns the next one
 extern bool g_mmio_log;                            // log every first access to a register
 
@@ -77,6 +80,7 @@ void audio_play(const uint8_t* be_rl, uint32_t frames, uint32_t rate);
 // options ask (-1: as the file says), and says whether the console is 16:9.
 struct SysconfOptions { int aspect = -1; int language = -1; };   // IPL.AR 0/1, IPL.LNG 0..6
 bool sysconf_prepare(const char* nand_root, const SysconfOptions& o);
+extern bool g_sysconf_eurgb60;                     // IPL.E60, after sysconf_prepare: PAL consoles may use 60 Hz
 
 // ---- IOS (ios.cpp) ------------------------------------------------------------------
 void ios_init(const char* disc_root, const char* nand_root);

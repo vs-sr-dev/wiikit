@@ -81,12 +81,29 @@ bool vi_irq() {
     }
     return false;
 }
+// The timing the game programmed: a half-line lasts HLW samples at 13.5 MHz
+// (27 MHz when VICLK selects 54 MHz, progressive), and a field is 3 EQU +
+// PRB + 2 ACV + PSB half-lines (VTR, and VTO/VTE for odd and even fields):
+// NTSC and EuRGB60 525 x 429 (59.94 Hz), PAL 625 x 432 (50 Hz). Until it is
+// programmed, NTSC.
+struct ViTiming { uint32_t hlw, halflines; double sample_hz; };
+ViTiming vi_timing() {
+    uint32_t hlw = vi[0x03] & 0x1FF, equ = vi[0x00] & 0xF, acv = vi[0x00] >> 4 & 0x3FF;
+    uint32_t odd = 3 * equ + (vi[0x07] & 0x3FF) + 2 * acv + (vi[0x06] & 0x3FF);
+    uint32_t even = 3 * equ + (vi[0x09] & 0x3FF) + 2 * acv + (vi[0x08] & 0x3FF);
+    double hz = (vi[0x36] & 1) ? 27e6 : 13.5e6;
+    uint32_t hl = (odd + even) / 2;
+    double field = hl * (double)hlw / hz;
+    if (!hlw || field < 0.010 || field > 0.025) return {429, 525, 13.5e6};
+    return {hlw, hl, hz};
+}
 uint16_t vi_read(uint32_t off) {
     if (off == 0x2C || off == 0x2E) {               // VCT, HCT: the beam, from the clock
-        uint64_t ticks = os_tb_now() - vi_frame_tb;
-        uint32_t line = (uint32_t)(ticks * 15734 / 60750000);   // NTSC line rate
-        if (off == 0x2C) return (uint16_t)(1 + line % 263);
-        return (uint16_t)(1 + (ticks * 15734 * 858 / 60750000) % 858);
+        ViTiming t = vi_timing();
+        double s = (double)(os_tb_now() - vi_frame_tb) / 60750000.0 * t.sample_hz;   // samples into the field
+        uint32_t line = (uint32_t)(s / (2 * t.hlw));
+        if (off == 0x2C) return (uint16_t)(1 + line % ((t.halflines + 1) / 2));
+        return (uint16_t)(1 + (uint64_t)s % (2 * t.hlw));
     }
     if (off == 0x6E) return 0;                       // VISEL: composite cable
     return vi[off / 2];
@@ -665,6 +682,17 @@ void hw_vi_preset(bool pal) {
     vi[0x19] = 430;                                  //      pixel 430
     vi[0x1A] = 0x1000 | 1;                           // DI1: enabled, line 1
     vi[0x1B] = 1;
+}
+
+void hw_run_locked(void (*fn)()) {
+    std::lock_guard<std::recursive_mutex> lk(g_hw);
+    fn();
+}
+
+std::chrono::nanoseconds hw_vi_field_period() {
+    std::lock_guard<std::recursive_mutex> lk(g_hw);
+    ViTiming t = vi_timing();
+    return std::chrono::nanoseconds((int64_t)(t.halflines * (double)t.hlw / t.sample_hz * 1e9));
 }
 
 void hw_init() {

@@ -316,12 +316,15 @@ void idle_wait() {
 // The clock keeps host time: the guest may rewrite the time base (mttb), so
 // only the decrementer's distance is measured in guest ticks.
 void clock_main() {
-    const auto vi_period = std::chrono::nanoseconds(1001000000000ll / 60000);  // NTSC, 59.94 Hz
+    // retraces at the rate VI is programmed for: 59.94 Hz NTSC and EuRGB60,
+    // 50 Hz PAL
+    auto vi_period = hw_vi_field_period();
     auto next_vi = Clock::now() + vi_period;
     for (;;) {
         auto now = Clock::now();
         if (now >= next_vi) {
             hw_vi_retrace();
+            vi_period = hw_vi_field_period();
             next_vi += vi_period;
             if (next_vi <= now) next_vi = now + vi_period;
         }

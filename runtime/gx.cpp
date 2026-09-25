@@ -416,7 +416,13 @@ void bp_write(uint32_t v) {
     bp_mask = 0xFFFFFF;
     TRACE("BP %02X %06X\n", reg, bp[reg]);
     switch (reg) {
-    case 0x45: pe_ctrl |= 8; ++st.done; os_raise(); return;          // PE_DONE: draw done
+    case 0x45:                                                        // PE_DONE: draw done
+        // when the renderer gets there, as the GP would: the game waits
+        // for it asleep (GXWaitDrawDone), and its other threads (the
+        // disc, the sound stream) run meanwhile
+        if (video) { put<uint8_t>(VC_DRAWDONE); flush(true); return; }
+        pe_ctrl |= 8; ++st.done; os_raise();
+        return;
     case 0x47: pe_token = (uint16_t)val; return;                      // token
     case 0x48: pe_token = (uint16_t)val; pe_ctrl |= 4; os_raise(); return;   // token + interrupt
     case 0x64: return;                                                // TLUT source address
@@ -569,6 +575,10 @@ void gx_init() { video = video_enabled(); }
 // AI's, which start each audio frame's mix, above all. So does this wait.
 // A handler may switch guest threads, and another thread may hand the
 // record over in the meantime.
+void gx_draw_done_reached() {
+    hw_run_locked([] { pe_ctrl |= 8; ++st.done; os_raise(); });
+}
+
 void gx_submit_pending() {
     if (!submit_pending) return;
     submit_pending = false;
