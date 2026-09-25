@@ -14,14 +14,17 @@ unit.
 
 Switch tables: an unconditional `bctr` whose CTR came from `lwzx` off a
 lis/addi-built base is a table jump. Its size comes from the data symbol at
-the table's address. If the base is lost across a branch, the fallback takes
-the one data table whose entries all point into this unit. Every other `bctr`
-is an indirect tail call.
+the table's address; with no symbol there (a stripped executable), from the
+run of words pointing into the unit, capped by a `cmplwi` bound on the index
+in the instructions before. If the base is lost across a branch, the
+fallback takes the one data table whose entries all point into this unit.
+Every other `bctr` is an indirect tail call.
 """
 import bisect
 import struct
 
 from .. import ppc
+from .discover import scan_table
 
 
 class Unit:
@@ -96,7 +99,10 @@ class Program:
             tr = ppc.Tracker(img)
             cand, via_lwzx, table = {}, set(), None
             used = set()
+            bound = None
             for a, i in u.ins:
+                if i.op == "cmpli" and i.f.get("L", 0) == 0:
+                    bound = (a, i.f["imm"] + 1)
                 if i.op == "lwzx":
                     via_lwzx.add(i.f["D"])
                     if i.f["A"] in tr.regs:
@@ -110,7 +116,10 @@ class Program:
                     if base in dsyms:
                         n = dsyms[base].size // 4
                         targets = [img.u32(base + 4 * k) for k in range(n)]
-                    elif is_table:
+                    elif base is not None and is_table and not dsyms:          # stripped
+                        near = bound[1] if bound and a - bound[0] <= 64 else None
+                        targets = scan_table(img, base, u.start, u.end, near)
+                    if targets is None and base not in dsyms and is_table:
                         free = [t for t in by_unit.get(u.start, []) if t[0] not in used]
                         if len(free) == 1:
                             base, targets = free[0]

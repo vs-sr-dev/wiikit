@@ -1,4 +1,4 @@
-"""Wii disc images: .iso and .wbfs, partitions, decryption, file system.
+"""Wii disc images: .iso, .wbfs, .rvz and .wia; partitions, decryption, file system.
 
     python -m wiikit.disc GAME.wbfs --info
     python -m wiikit.disc GAME.wbfs --list [--part DATA]
@@ -14,6 +14,12 @@ WBFS  A sparse container written by USB loaders. The disc is cut into "WBFS
       slot. Slot n's info sits at hd_sector * (1 + n): a 0x100-byte copy of the
       disc header followed by the u16 table. open_disc() turns either format
       into one seek/read/tell object, so nothing further down cares.
+
+RVZ, WIA
+      Dolphin's compressed formats (rvz.py). They keep partition data
+      decrypted, without hashes: their seek/read give the disc's bytes
+      outside partition data, and Partition reads the payload straight from
+      them, with no AES at all.
 
 Disc  0x000 game id (6 chars), 0x018 Wii magic 0x5D1C9EA3, 0x020 title.
       0x40000: four partition groups (u32 count, u32 table offset >> 2); each
@@ -39,7 +45,7 @@ import argparse
 import os
 import struct
 
-from . import aes
+from . import aes, rvz
 
 WII_MAGIC = 0x5D1C9EA3
 WII_SECTOR = 0x8000
@@ -112,7 +118,11 @@ class Wbfs:
 def open_disc(path):
     with open(path, "rb") as f:
         magic = f.read(4)
-    return Wbfs(path) if magic == b"WBFS" else open(path, "rb")
+    if magic == b"WBFS":
+        return Wbfs(path)
+    if magic in (b"RVZ", b"WIA"):
+        return rvz.Rvz(path)
+    return open(path, "rb")
 
 
 def header(disc):
@@ -160,6 +170,8 @@ class Partition:
         disc.seek(offset + (be32(t, 0x2A8) << 2))
         self.tmd = disc.read(be32(t, 0x2A4))
         self._idx, self._buf = -1, b""
+        payload = getattr(disc, "payload", None)       # RVZ/WIA: stored decrypted
+        self._direct = payload(offset, self.data_off) if payload else None
 
     def _cluster(self, idx):
         if idx != self._idx:
@@ -171,6 +183,8 @@ class Partition:
         return self._buf
 
     def read(self, off, size):
+        if self._direct:
+            return self._direct(off, size)
         out = bytearray()
         while size > 0:
             idx, within = divmod(off, PAYLOAD)
@@ -286,7 +300,7 @@ def main():
             print(f"{off:10X} {size:10d}  {rel}")
         return
     h = header(disc)
-    kind = "WBFS" if isinstance(disc, Wbfs) else "ISO"
+    kind = "WBFS" if isinstance(disc, Wbfs) else disc.kind if isinstance(disc, rvz.Rvz) else "ISO"
     print(f"{kind}  {h['game_id']}  '{h['title']}'  disc {h['disc_no']} v{h['version']}"
           f"  {'Wii' if h['wii'] else 'not Wii'}")
     if isinstance(disc, Wbfs):

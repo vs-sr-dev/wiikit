@@ -266,10 +266,14 @@ def main():
     ap.add_argument("--no-comments", action="store_true")
     ap.add_argument("--hooks", action="append", default=[],
                     help="an extra hook list; the runtime's own (runtime/hooks.txt) is always read")
+    ap.add_argument("--symbols", metavar="TSV",
+                    help="names for a stripped executable (addr, ..., name); its functions "
+                         "are found by discovery (recomp/discover.py)")
     a = ap.parse_args()
     img = Image(a.image)
-    if not img.symbols:
-        raise SystemExit("needs a symbolised ELF")
+    if not img.functions():
+        from .discover import load_names, symbolise
+        symbolise(img, load_names(a.symbols) if a.symbols else None)
     generate(img, a.out, a.per_file, not a.no_comments,
              [os.path.join(RUNTIME, "hooks.txt")] + a.hooks)
 

@@ -3,7 +3,8 @@
 Each module handles one thing the Wii platform, its SDK or its toolchain
 imposes on every game, independent of any particular title:
 
-    disc     disc images (.iso, .wbfs): partitions, decryption, FST, extraction
+    disc     disc images (.iso, .wbfs, .rvz, .wia): partitions, decryption, FST, extraction
+    rvz      Dolphin's RVZ and WIA images: tables, zstd/LZMA/bzip2, junk regeneration
     aes      AES-128-CBC decryption in pure Python (pycryptodome if present)
     dol      DOL and ELF executables: address map, symbols, comparison, library census
     cw       CodeWarrior C++ name demangling
@@ -12,7 +13,7 @@ imposes on every game, independent of any particular title:
     tpl      TPL texture palettes
     u8       U8 archives
     dsp      DSP-ADPCM header and decoder
-    recomp   static recompilation of Gekko code to C++ (layer 4)
+    recomp   static recompilation of Gekko code to C++ (layer 4), stripped DOLs included
     profile  names the addresses wiiboot's sampling profiler reports
 
 wiikit/runtime/ holds the C++ side: ppc.h (the CPU model the generated code
