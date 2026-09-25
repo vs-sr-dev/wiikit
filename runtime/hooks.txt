@@ -61,3 +61,4 @@ KPADEnableDPD
 KPADDisableDPD
 KPADGetSensorHeight
 KPADIsEnableAimingMode
+__VIRetraceHandler     # VI's interrupt: the Remotes' connect and extension callbacks are called after it

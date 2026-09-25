@@ -55,6 +55,7 @@ SDL_Semaphore* wake = nullptr;
 std::atomic<uint32_t> xfb_addr{0}, retraces{0}, vi_lines{480};
 std::mutex pad_mx;
 PadState pad;
+ClassicState classic[4];
 
 // ---- GX state, as the record left it --------------------------------------------------------
 uint32_t bp[0x100], xf[0x1058];
@@ -671,12 +672,23 @@ Rect picture_rect(float w, float h) {
 // is the pointer; the buttons come from a key file (--keys, keys.txt next to
 // the extracted disc by default), written with the defaults when there is
 // none. Home has no key: Esc opens the port's own menu (video_run) instead
-// of the Wii's; F11 and Alt+Enter switch fullscreen.
-// a key or a mouse button (mask); drag: only while the mouse moves fast with the button held
-struct Binding { SDL_Scancode key; uint32_t mouse; uint32_t bits; bool shake; bool drag; };
+// of the Wii's; F11 and Alt+Enter switch fullscreen. The file's
+// [Classic Controller] section does the same for the Classic Controller
+// (video_classic); a file without one takes the defaults' for it.
+// a key or a mouse button (mask); drag: only while the mouse moves fast with the button held;
+// classic: bits are the Classic's (KPAD's bits, and the sticks' directions from kStick)
+struct Binding { SDL_Scancode key; uint32_t mouse; uint32_t bits; bool shake; bool drag; bool classic; };
 // not Remote buttons: the Remote raised, pointing up (PadState::tilt)
 constexpr uint32_t kRaisePlus = 1u << 24, kRaiseMinus = 1u << 25;
+// the Classic's buttons (KPAD_CL_*), and its sticks pushed to the full by a key
+enum : uint32_t { CL_UP = 0x0001, CL_LEFT = 0x0002, CL_ZR = 0x0004, CL_X = 0x0008, CL_A = 0x0010,
+                  CL_Y = 0x0020, CL_B = 0x0040, CL_ZL = 0x0080, CL_R = 0x0200, CL_PLUS = 0x0400,
+                  CL_HOME = 0x0800, CL_MINUS = 0x1000, CL_L = 0x2000, CL_DOWN = 0x4000, CL_RIGHT = 0x8000 };
+constexpr uint32_t kStick = 1u << 16;               // L up, down, left, right, then R's: kStick << 0..7
 std::vector<Binding> bindings;
+int keys_input = INPUT_AUTO;                        // the key file's Input
+bool face_by_label = false;                         // the key file's Face Buttons = Label
+float dead_zone = 0.15f;                            // the key file's Dead Zone: of the sticks' travel, radial
 
 const char* DEFAULT_KEYS =
     "# wiiboot's keys: each Wii Remote button, then the keys and mouse buttons that press it.\n"
@@ -695,11 +707,145 @@ const char* DEFAULT_KEYS =
     "Minus = Q\n"
     "1     = 1\n"
     "2     = 2\n"
-    "Shake = Space, Mouse Middle\n";
+    "Shake = Space, Mouse Middle\n"
+    "\n"
+    "[Classic Controller]\n"
+    "# For a game that plays with the Classic Controller: its buttons and sticks on keys and mouse buttons.\n"
+    "# A gamepad is a Classic Controller too, on the channels in the order the pads are plugged in. Channel 1\n"
+    "# takes the keys, the mouse and the first pad at once (Input = Pad or Keyboard: only one of them;\n"
+    "# wiiboot --input says the same).\n"
+    "# The pad: its triggers are ZL and ZR, its shoulders L and R, Start +, Back -, its guide button Home.\n"
+    "# Face Buttons = Position: the right one is A, the bottom one B, the top one X, the left one Y (the\n"
+    "# Classic's own layout); Label: the button labelled A (Cross) is A, B (Circle) B, X (Square) X, Y (Triangle) Y.\n"
+    "# Dead Zone: how far the pad's sticks move before they count, of their travel.\n"
+    "Input        = Auto\n"
+    "Face Buttons = Position\n"
+    "Dead Zone    = 0.15\n"
+    "A     = Return, Space\n"
+    "B     = Backspace, C\n"
+    "X     = R\n"
+    "Y     = F\n"
+    "L     = Left Shift\n"
+    "R     = E\n"
+    "ZL    = Mouse Right\n"
+    "ZR    = Mouse Left\n"
+    "Plus  = Tab\n"
+    "Minus = Q\n"
+    "Home  = H\n"
+    "Up    = Up\n"
+    "Down  = Down\n"
+    "Left  = Left\n"
+    "Right = Right\n"
+    "Left Stick Up    = W\n"
+    "Left Stick Down  = S\n"
+    "Left Stick Left  = A\n"
+    "Left Stick Right = D\n"
+    "Right Stick Up    =\n"
+    "Right Stick Down  =\n"
+    "Right Stick Left  =\n"
+    "Right Stick Right =\n";
 
 std::string trim(const std::string& t) {
     size_t a = t.find_first_not_of(" \t\r"), b = t.find_last_not_of(" \t\r");
     return a == std::string::npos ? std::string() : t.substr(a, b - a + 1);
+}
+
+// The bindings of a key file's text: the Remote's lines (before any section,
+// or under [Wii Remote]) if remote, the [Classic Controller] section's if
+// classic. True if the text has a Classic section.
+bool parse_keys(const std::string& text, const std::string& path, bool remote, bool classic) {
+    struct Btn { const char* name; uint32_t bits; };
+    static const Btn buttons[] = {{"A", 0x0800}, {"B", 0x0400}, {"Up", 0x0008}, {"Down", 0x0004},
+                                  {"Left", 0x0001}, {"Right", 0x0002}, {"Plus", 0x0010}, {"Minus", 0x1000},
+                                  {"1", 0x0200}, {"2", 0x0100}, {"Shake", 0},
+                                  {"Raise", kRaisePlus}, {"Raise Alt", kRaiseMinus}};
+    static const Btn cl_buttons[] = {{"A", CL_A}, {"B", CL_B}, {"X", CL_X}, {"Y", CL_Y}, {"L", CL_L}, {"R", CL_R},
+                                     {"ZL", CL_ZL}, {"ZR", CL_ZR}, {"Plus", CL_PLUS}, {"Minus", CL_MINUS},
+                                     {"Home", CL_HOME}, {"Up", CL_UP}, {"Down", CL_DOWN}, {"Left", CL_LEFT},
+                                     {"Right", CL_RIGHT},
+                                     {"Left Stick Up", kStick << 0}, {"Left Stick Down", kStick << 1},
+                                     {"Left Stick Left", kStick << 2}, {"Left Stick Right", kStick << 3},
+                                     {"Right Stick Up", kStick << 4}, {"Right Stick Down", kStick << 5},
+                                     {"Right Stick Left", kStick << 6}, {"Right Stick Right", kStick << 7}};
+    static const Btn mice[] = {{"Mouse Left", SDL_BUTTON_LMASK}, {"Mouse Right", SDL_BUTTON_RMASK},
+                               {"Mouse Middle", SDL_BUTTON_MMASK}, {"Mouse X1", SDL_BUTTON_X1MASK},
+                               {"Mouse X2", SDL_BUTTON_X2MASK}};
+    bool in_classic = false, has_classic = false;
+    size_t start = 0;
+    for (int line = 1; start < text.size(); ++line) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string l = trim(text.substr(start, end - start));
+        start = end + 1;
+        if (l.empty() || l[0] == '#') continue;
+        if (l[0] == '[') {
+            std::string sec = trim(l.substr(1, l.find(']') - 1));
+            in_classic = SDL_strcasecmp(sec.c_str(), "Classic Controller") == 0 || SDL_strcasecmp(sec.c_str(), "Classic") == 0;
+            has_classic |= in_classic;
+            if (!in_classic && SDL_strcasecmp(sec.c_str(), "Wii Remote") != 0 && SDL_strcasecmp(sec.c_str(), "Remote") != 0)
+                rt_log("video: %s:%d: no section [%s] ([Wii Remote], [Classic Controller])", path.c_str(), line, sec.c_str());
+            continue;
+        }
+        if (in_classic ? !classic : !remote) continue;
+        size_t eq = l.find('=');
+        std::string lhs = eq == std::string::npos ? l : trim(l.substr(0, eq));
+        std::string rest = eq == std::string::npos ? std::string() : trim(l.substr(eq + 1));
+        if (in_classic && eq != std::string::npos) {                   // the section's settings
+            if (SDL_strcasecmp(lhs.c_str(), "Input") == 0) {
+                static const char* names[] = {"Auto", "Pad", "Keyboard"};
+                int v = -1;
+                for (int i = 0; i < 3; ++i)
+                    if (SDL_strcasecmp(rest.c_str(), names[i]) == 0) v = i;
+                if (v < 0) rt_log("video: %s:%d: Input is Auto, Pad or Keyboard", path.c_str(), line);
+                else keys_input = v;
+                continue;
+            }
+            if (SDL_strcasecmp(lhs.c_str(), "Face Buttons") == 0) {
+                if (SDL_strcasecmp(rest.c_str(), "Label") == 0) face_by_label = true;
+                else if (SDL_strcasecmp(rest.c_str(), "Position") == 0) face_by_label = false;
+                else rt_log("video: %s:%d: Face Buttons is Position or Label", path.c_str(), line);
+                continue;
+            }
+            if (SDL_strcasecmp(lhs.c_str(), "Dead Zone") == 0) {
+                dead_zone = std::clamp((float)std::atof(rest.c_str()), 0.0f, 0.9f);
+                continue;
+            }
+        }
+        const Btn* b = nullptr;
+        if (eq != std::string::npos) {
+            if (in_classic) {
+                for (const Btn& c : cl_buttons)
+                    if (SDL_strcasecmp(lhs.c_str(), c.name) == 0) b = &c;
+            } else {
+                for (const Btn& c : buttons)
+                    if (SDL_strcasecmp(lhs.c_str(), c.name) == 0) b = &c;
+            }
+        }
+        if (!b) {
+            if (in_classic) rt_log("video: %s:%d: not a Classic Controller button (A B X Y L R ZL ZR Plus Minus Home Up Down Left Right, "
+                                   "Left Stick Up..., Right Stick Up...) or setting (Input, Face Buttons, Dead Zone)", path.c_str(), line);
+            else rt_log("video: %s:%d: not a Remote button (A B Up Down Left Right Plus Minus 1 2 Shake Raise)", path.c_str(), line);
+            continue;
+        }
+        for (size_t p = 0; p <= rest.size();) {
+            size_t q = rest.find(',', p);
+            if (q == std::string::npos) q = rest.size();
+            std::string name = trim(rest.substr(p, q - p));
+            p = q + 1;
+            if (name.empty()) continue;
+            Binding k{SDL_SCANCODE_UNKNOWN, 0, b->bits, !in_classic && b->bits == 0, false, in_classic};
+            for (const Btn& m : mice)
+                if (SDL_strcasecmp(name.c_str(), m.name) == 0) k.mouse = m.bits;
+            static const Btn drags[] = {{"Drag Left", SDL_BUTTON_LMASK}, {"Drag Right", SDL_BUTTON_RMASK},
+                                        {"Drag Middle", SDL_BUTTON_MMASK}};
+            for (const Btn& m : drags)
+                if (SDL_strcasecmp(name.c_str(), m.name) == 0) { k.mouse = m.bits; k.drag = true; }
+            if (!k.mouse) k.key = SDL_GetScancodeFromName(name.c_str());
+            if (!k.mouse && k.key == SDL_SCANCODE_UNKNOWN) { rt_log("video: %s:%d: no key named \"%s\"", path.c_str(), line, name.c_str()); continue; }
+            bindings.push_back(k);
+        }
+    }
+    return has_classic;
 }
 
 void load_keys(const std::string& path) {
@@ -716,46 +862,119 @@ void load_keys(const std::string& path) {
             rt_log("video: wrote the default keys to %s", path.c_str());
         }
     }
-    struct Btn { const char* name; uint32_t bits; };
-    static const Btn buttons[] = {{"A", 0x0800}, {"B", 0x0400}, {"Up", 0x0008}, {"Down", 0x0004},
-                                  {"Left", 0x0001}, {"Right", 0x0002}, {"Plus", 0x0010}, {"Minus", 0x1000},
-                                  {"1", 0x0200}, {"2", 0x0100}, {"Shake", 0},
-                                  {"Raise", kRaisePlus}, {"Raise Alt", kRaiseMinus}};
-    static const Btn mice[] = {{"Mouse Left", SDL_BUTTON_LMASK}, {"Mouse Right", SDL_BUTTON_RMASK},
-                               {"Mouse Middle", SDL_BUTTON_MMASK}, {"Mouse X1", SDL_BUTTON_X1MASK},
-                               {"Mouse X2", SDL_BUTTON_X2MASK}};
     bindings.clear();
-    size_t start = 0;
-    for (int line = 1; start < text.size(); ++line) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) end = text.size();
-        std::string l = trim(text.substr(start, end - start));
-        start = end + 1;
-        if (l.empty() || l[0] == '#') continue;
-        size_t eq = l.find('=');
-        const Btn* b = nullptr;
-        if (eq != std::string::npos)
-            for (const Btn& c : buttons)
-                if (SDL_strcasecmp(trim(l.substr(0, eq)).c_str(), c.name) == 0) b = &c;
-        if (!b) { rt_log("video: %s:%d: not a Remote button (A B Up Down Left Right Plus Minus 1 2 Shake Raise)", path.c_str(), line); continue; }
-        std::string rest = l.substr(eq + 1);
-        for (size_t p = 0; p <= rest.size();) {
-            size_t q = rest.find(',', p);
-            if (q == std::string::npos) q = rest.size();
-            std::string name = trim(rest.substr(p, q - p));
-            p = q + 1;
-            if (name.empty()) continue;
-            Binding k{SDL_SCANCODE_UNKNOWN, 0, b->bits, b->bits == 0, false};
-            for (const Btn& m : mice)
-                if (SDL_strcasecmp(name.c_str(), m.name) == 0) k.mouse = m.bits;
-            static const Btn drags[] = {{"Drag Left", SDL_BUTTON_LMASK}, {"Drag Right", SDL_BUTTON_RMASK},
-                                        {"Drag Middle", SDL_BUTTON_MMASK}};
-            for (const Btn& m : drags)
-                if (SDL_strcasecmp(name.c_str(), m.name) == 0) { k.mouse = m.bits; k.drag = true; }
-            if (!k.mouse) k.key = SDL_GetScancodeFromName(name.c_str());
-            if (!k.mouse && k.key == SDL_SCANCODE_UNKNOWN) { rt_log("video: %s:%d: no key named \"%s\"", path.c_str(), line, name.c_str()); continue; }
-            bindings.push_back(k);
+    if (!parse_keys(text, path, true, true)) parse_keys(DEFAULT_KEYS, "(the default keys)", false, true);
+}
+
+// ---- gamepads, as Classic Controllers ----------------------------------------------------------
+// A pad keeps its channel while it stays plugged in; a new one takes the
+// lowest free channel (from channel 2 with Input = Keyboard, channel 1 being
+// the keyboard's alone).
+SDL_Gamepad* chan_pad[4] = {};
+std::atomic<bool> rumble_want[4];
+int input_mode() { return opt.input >= 0 ? opt.input : keys_input; }
+
+void pad_added(SDL_JoystickID id) {
+    for (SDL_Gamepad* g : chan_pad)
+        if (g && SDL_GetGamepadID(g) == id) return;
+    int first = input_mode() == INPUT_KEYBOARD ? 1 : 0, chan = -1;
+    for (int i = first; i < 4 && chan < 0; ++i)
+        if (!chan_pad[i]) chan = i;
+    if (chan < 0) { rt_log("video: a fifth pad (%s): no channel for it", SDL_GetGamepadNameForID(id)); return; }
+    SDL_Gamepad* g = SDL_OpenGamepad(id);
+    if (!g) { rt_log("video: pad %s: %s", SDL_GetGamepadNameForID(id), SDL_GetError()); return; }
+    chan_pad[chan] = g;
+    rt_log("video: pad \"%s\" (%s) on channel %d%s", SDL_GetGamepadName(g),
+           SDL_GetGamepadStringForType(SDL_GetGamepadType(g)), chan + 1,
+           chan == 0 && input_mode() == INPUT_AUTO ? ", with the keyboard and the mouse" : "");
+}
+
+void pad_removed(SDL_JoystickID id) {
+    for (int i = 0; i < 4; ++i)
+        if (chan_pad[i] && SDL_GetGamepadID(chan_pad[i]) == id) {
+            rt_log("video: pad \"%s\" off channel %d", SDL_GetGamepadName(chan_pad[i]), i + 1);
+            SDL_CloseGamepad(chan_pad[i]);
+            chan_pad[i] = nullptr;
         }
+}
+
+float axis(SDL_Gamepad* g, SDL_GamepadAxis a) { return std::clamp(SDL_GetGamepadAxis(g, a) / 32767.0f, -1.0f, 1.0f); }
+
+// a stick through the dead zone (radial, the rest of the travel rescaled to
+// 0..1), y up
+void stick(SDL_Gamepad* g, SDL_GamepadAxis ax, SDL_GamepadAxis ay, float& x, float& y) {
+    x = axis(g, ax);
+    y = -axis(g, ay);
+    float m = std::hypot(x, y);
+    float k = m <= dead_zone ? 0.0f : std::min(1.0f, (m - dead_zone) / (1 - dead_zone)) / m;
+    x *= k;
+    y *= k;
+}
+
+ClassicState classic_from_pad(SDL_Gamepad* g) {
+    ClassicState s;
+    s.connected = true;
+    static const struct { SDL_GamepadButton b; uint32_t bit; } fixed[] = {
+        {SDL_GAMEPAD_BUTTON_DPAD_UP, CL_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, CL_DOWN},
+        {SDL_GAMEPAD_BUTTON_DPAD_LEFT, CL_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, CL_RIGHT},
+        {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, CL_L}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, CL_R},
+        {SDL_GAMEPAD_BUTTON_START, CL_PLUS}, {SDL_GAMEPAD_BUTTON_BACK, CL_MINUS}, {SDL_GAMEPAD_BUTTON_GUIDE, CL_HOME}};
+    for (auto& f : fixed)
+        if (SDL_GetGamepadButton(g, f.b)) s.buttons |= f.bit;
+    // the face buttons: by position, the Classic's own layout (A right, B
+    // bottom, X top, Y left), or by the pad's labels
+    static const struct { SDL_GamepadButton b; uint32_t pos; } face[] = {
+        {SDL_GAMEPAD_BUTTON_EAST, CL_A}, {SDL_GAMEPAD_BUTTON_SOUTH, CL_B},
+        {SDL_GAMEPAD_BUTTON_NORTH, CL_X}, {SDL_GAMEPAD_BUTTON_WEST, CL_Y}};
+    for (auto& f : face) {
+        if (!SDL_GetGamepadButton(g, f.b)) continue;
+        uint32_t bit = f.pos;
+        if (face_by_label) switch (SDL_GetGamepadButtonLabel(g, f.b)) {
+            case SDL_GAMEPAD_BUTTON_LABEL_A: case SDL_GAMEPAD_BUTTON_LABEL_CROSS: bit = CL_A; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_B: case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE: bit = CL_B; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_X: case SDL_GAMEPAD_BUTTON_LABEL_SQUARE: bit = CL_X; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_Y: case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: bit = CL_Y; break;
+            default: break;
+        }
+        s.buttons |= bit;
+    }
+    // the triggers are ZL and ZR (the Classic Controller Pro's place for
+    // them); L and R, digital on the Pro, report their analog value full
+    if (axis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0.5f) s.buttons |= CL_ZL;
+    if (axis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.5f) s.buttons |= CL_ZR;
+    s.lt = s.buttons & CL_L ? 1.0f : 0.0f;
+    s.rt = s.buttons & CL_R ? 1.0f : 0.0f;
+    stick(g, SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, s.lx, s.ly);
+    stick(g, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, s.rx, s.ry);
+    return s;
+}
+
+// channel 1's two sources as one: buttons OR'd, each stick the one deflected
+// more (never summed: WASD and the stick together are no faster)
+void merge(ClassicState& a, const ClassicState& b) {
+    a.connected |= b.connected;
+    a.buttons |= b.buttons;
+    if (std::hypot(b.lx, b.ly) > std::hypot(a.lx, a.ly)) { a.lx = b.lx; a.ly = b.ly; }
+    if (std::hypot(b.rx, b.ry) > std::hypot(a.rx, a.ry)) { a.rx = b.rx; a.ry = b.ry; }
+    a.lt = std::max(a.lt, b.lt);
+    a.rt = std::max(a.rt, b.rt);
+}
+
+// the Remote's motor on the channel's pad: on and off as the game asks,
+// renewed while it stays on (SDL's rumble lasts as long as it is told)
+void update_rumble() {
+    static bool on[4];
+    static Clock::time_point renewed[4];
+    auto now = Clock::now();
+    for (int i = 0; i < 4; ++i) {
+        bool want = rumble_want[i].load() && chan_pad[i];
+        if (want && (!on[i] || now - renewed[i] > std::chrono::milliseconds(500))) {
+            SDL_RumbleGamepad(chan_pad[i], 0x6000, 0xA000, 1000);
+            renewed[i] = now;
+        } else if (!want && on[i] && chan_pad[i]) {
+            SDL_RumbleGamepad(chan_pad[i], 0, 0, 0);
+        }
+        on[i] = want;
     }
 }
 
@@ -787,10 +1006,12 @@ void update_pad() {
         }
     }
     bool dragging = Clock::now() < drag_until;
+    uint32_t cl = 0;                                          // the Classic's buttons and stick directions from keys
     for (const Binding& k : bindings) {
         bool down = k.mouse ? (mb & k.mouse) != 0 && (!k.drag || dragging)
                             : ks[k.key] && !(alt && (k.key == SDL_SCANCODE_RETURN || k.key == SDL_SCANCODE_KP_ENTER));
         if (!down) continue;
+        if (k.classic) { cl |= k.bits; continue; }
         p.buttons |= k.bits;
         if (k.shake) p.shake = true;
         if (k.bits & kRaisePlus) p.tilt = 1;
@@ -817,6 +1038,7 @@ void update_pad() {
     // start) press buttons for 150 ms (A B 1 2 + - H U D L R, X = shake), or
     // move the pointer, which stays: reproducible runs for debugging
     static const char* script = std::getenv("WIIKIT_PAD");
+    uint32_t scripted = 0;
     static const Clock::time_point t0 = Clock::now();
     static float sx = 0, sy = 0;
     static bool spointer = false;
@@ -837,7 +1059,7 @@ void update_pad() {
                     static const uint32_t bits[] = {0x0800, 0x0400, 0x0200, 0x0100, 0x0010, 0x1000,
                                                     0x8000, 0x0008, 0x0004, 0x0001, 0x0002};
                     const char* n = std::strchr(names, *q);
-                    if (n && t >= at && t < at + 0.15) p.buttons |= bits[n - names];
+                    if (n && t >= at && t < at + 0.15) scripted |= bits[n - names];
                     if (*q == 'X' && t >= at && t < at + 0.15) p.shake = true;
                 }
             }
@@ -845,8 +1067,37 @@ void update_pad() {
         }
         if (spointer && !p.pointer) { p.x = sx; p.y = sy; p.pointer = true; }
     }
+    p.buttons |= scripted;
+    // the Classic Controllers: channel 1 the keys, the mouse's buttons and
+    // the script (its Remote buttons as the Classic's: 1 is X, 2 is Y),
+    // merged with its pad unless Input says one of them; the others their pads
+    ClassicState c[4];
+    int mode = input_mode();
+    if (mode != INPUT_PAD) {
+        static const uint32_t from_remote[][2] = {{0x0800, CL_A}, {0x0400, CL_B}, {0x0200, CL_X}, {0x0100, CL_Y},
+                                                  {0x0010, CL_PLUS}, {0x1000, CL_MINUS}, {0x8000, CL_HOME},
+                                                  {0x0008, CL_UP}, {0x0004, CL_DOWN}, {0x0001, CL_LEFT}, {0x0002, CL_RIGHT}};
+        for (auto& m : from_remote)
+            if (scripted & m[0]) cl |= m[1];
+        ClassicState& k = c[0];
+        k.connected = true;
+        k.buttons = cl & 0xFFFF;
+        auto dir = [&](int i) { return cl & (kStick << i) ? 1.0f : 0.0f; };
+        k.lx = dir(3) - dir(2);
+        k.ly = dir(0) - dir(1);
+        k.rx = dir(7) - dir(6);
+        k.ry = dir(4) - dir(5);
+        if (k.lx && k.ly) { k.lx *= 0.7071f; k.ly *= 0.7071f; }
+        if (k.rx && k.ry) { k.rx *= 0.7071f; k.ry *= 0.7071f; }
+        k.lt = k.buttons & CL_L ? 1.0f : 0.0f;
+        k.rt = k.buttons & CL_R ? 1.0f : 0.0f;
+    }
+    for (int i = 0; i < 4; ++i)
+        if (chan_pad[i] && !(i == 0 && mode == INPUT_KEYBOARD)) merge(c[i], classic_from_pad(chan_pad[i]));
+    update_rumble();
     std::lock_guard<std::mutex> lk(pad_mx);
     pad = p;
+    for (int i = 0; i < 4; ++i) classic[i] = c[i];
 }
 
 void present() {
@@ -1009,6 +1260,13 @@ PadState video_pad() {
     std::lock_guard<std::mutex> lk(pad_mx);
     return pad;
 }
+ClassicState video_classic(int chan) {
+    std::lock_guard<std::mutex> lk(pad_mx);
+    return chan >= 0 && chan < 4 ? classic[chan] : ClassicState{};
+}
+void video_set_rumble(int chan, bool on) {
+    if (chan >= 0 && chan < 4) rumble_want[chan] = on;
+}
 void video_retrace() {
     retraces.fetch_add(1);
     if (wake) SDL_SignalSemaphore(wake);
@@ -1016,7 +1274,7 @@ void video_retrace() {
 
 // ---- the window --------------------------------------------------------------------------------
 void video_run(const char* title) {
-    if (!SDL_Init(SDL_INIT_VIDEO)) rt_die("video: SDL_Init: %s", SDL_GetError());
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) rt_die("video: SDL_Init: %s", SDL_GetError());
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -1064,6 +1322,8 @@ void video_run(const char* title) {
         bool quit = false;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED) pad_added(e.gdevice.which);
+            if (e.type == SDL_EVENT_GAMEPAD_REMOVED) pad_removed(e.gdevice.which);
             // F11 or Alt+Enter: fullscreen and back
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 (e.key.scancode == SDL_SCANCODE_F11 ||

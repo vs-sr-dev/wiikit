@@ -58,7 +58,9 @@ struct VideoOptions {
     bool fullscreen = false;                 // start fullscreen (borderless, at the desktop's mode)
     int window_w = 0, window_h = 0;          // the window's size; 0 = 720 lines at the screen's shape
     std::string keys;                        // the key file: the Remote's buttons on keys and mouse buttons
+    int input = -1;                          // channel 1's sources (INPUT_*); -1: as the key file says (auto)
 };
+enum { INPUT_AUTO, INPUT_PAD, INPUT_KEYBOARD };
 void video_configure(const VideoOptions& o);
 // The host's input as a Wii Remote (read by wpad.cpp): WPAD core button
 // bits; the pointer over the picture VI shows, -1..1 with y down, when the
@@ -67,6 +69,18 @@ void video_configure(const VideoOptions& o);
 // sign of KPAD's acc.z then, while a game's expectation is found out)
 struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false, shake = false; int tilt = 0; };
 PadState video_pad();
+// A Classic Controller on each of the four channels (for a game that plays
+// with one: wpad_set_classic). Gamepads (SDL's: XInput, DualShock and
+// DualSense, Switch Pro...) are Classic Controllers, on channels in the
+// order they are plugged in; channel 1 (chan 0) is also the keyboard and
+// the mouse buttons (the key file's [Classic Controller]), merged with its
+// pad: buttons OR'd, each stick from whichever source is deflected more.
+// Buttons are KPAD's Classic bits; sticks -1..1, y up; triggers 0..1.
+struct ClassicState { bool connected = false; uint32_t buttons = 0; float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0; };
+ClassicState video_classic(int chan);
+// The Remote's motor on a channel: its pad rumbles (the Remote's own on
+// channel 1 when a pad is there).
+void video_set_rumble(int chan, bool on);
 // Relative mouse, for a port that turns the mouse's motion into a stick or a
 // view: the cursor is captured while the window has the focus (released for
 // the pause box), and the motion is summed until taken.

@@ -4,13 +4,17 @@
 //                         [--no-video] [--no-audio] [--scale N] [--frames-ahead N] [--dump DIR]
 //                         [--dump-every N] [--quit-after SECONDS] [--aspect 16:9|4:3]
 //                         [--language en|fr|es|de|it|nl|ja] [--fullscreen] [--window WxH] [--keys FILE]
+//                         [--input auto|pad|keyboard]
 //
 // EXTRACT_DIR comes from `python -m wiikit.disc GAME --extract`. The NAND
 // (saves, SYSCONF) is a host folder, EXTRACT_DIR/../nand by default; its
 // SYSCONF is written on the first run (16:9, English), and --aspect and
 // --language change it for this run and the next ones. The key map is
 // EXTRACT_DIR/../keys.txt unless --keys says otherwise; a missing one is
-// written with the defaults. The
+// written with the defaults. For a game played with the Classic Controller,
+// --input says what channel 1 is: the keyboard, the mouse and the first
+// gamepad at once (auto, the default, unless the key file says otherwise),
+// the pad alone or the keyboard and mouse alone. The
 // boot ROM's fonts (font_western.bin, font_japanese.bin) and the DSP ROM's
 // resampling table (dsp_coef.bin) are looked for in EXTRACT_DIR/../fonts:
 // Dolphin's Sys/GC has free ones.
@@ -35,7 +39,8 @@ int main(int argc, char** argv) {
                              "                            [--no-video] [--no-audio] [--scale N] [--frames-ahead N] "
                              "[--dump DIR] [--dump-every N] [--quit-after SECONDS]\n"
                              "                            [--aspect 16:9|4:3] [--language en|fr|es|de|it|nl|ja] "
-                             "[--fullscreen] [--window WxH] [--keys FILE]\n");
+                             "[--fullscreen] [--window WxH] [--keys FILE]\n"
+                             "                            [--input auto|pad|keyboard]\n");
         return 2;
     }
     int watch = 0;
@@ -69,6 +74,14 @@ int main(int argc, char** argv) {
             ++i;
         } else if (!std::strcmp(argv[i], "--fullscreen")) vo.fullscreen = true;
         else if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) vo.keys = argv[++i];
+        else if (!std::strcmp(argv[i], "--input") && i + 1 < argc) {
+            std::string m = argv[++i];
+            vo.input = m == "auto" ? INPUT_AUTO : m == "pad" ? INPUT_PAD : m == "keyboard" ? INPUT_KEYBOARD : -2;
+            if (vo.input == -2) {
+                std::fprintf(stderr, "wiiboot: --input is auto, pad or keyboard\n");
+                return 2;
+            }
+        }
         else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) {
             if (std::sscanf(argv[++i], "%dx%d", &vo.window_w, &vo.window_h) != 2 || vo.window_w < 64 || vo.window_h < 48) {
                 std::fprintf(stderr, "wiiboot: --window is WIDTHxHEIGHT\n");

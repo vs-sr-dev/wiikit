@@ -67,6 +67,14 @@ void wpad_install();                               // WPAD/KPAD hooks
 // KPADStatus's size in the game's SDK (KPADRead fills whole samples): 0xF0
 // by default; the SDKs of 2006-07 have 0x84. The fields up to 0x5F agree.
 void wpad_set_kpad_status_size(uint32_t size);
+// The game plays with the Classic Controller: each channel's Remote holds
+// one where video.cpp has one (video_classic), and says so to the game's
+// connect and extension callbacks. A port's filter may change what a
+// channel's Classic reports before the game reads it (the mouse on a stick).
+struct ClassicState;
+using WpadClassicFilter = void (*)(int chan, ClassicState& s);
+void wpad_set_classic(bool on);
+void wpad_set_classic_filter(WpadClassicFilter f);
 
 // ---- audio (ax.cpp, audio.cpp) --------------------------------------------------------
 void ax_command_list(uint32_t addr);               // the AX micro-code: mix one frame
