@@ -67,6 +67,12 @@ void audio_init(bool enabled);                     // the host's audio device (S
 // right then left, as the Wii's AI reads them.
 void audio_play(const uint8_t* be_rl, uint32_t frames, uint32_t rate);
 
+// ---- SYSCONF (sysconf.cpp) -----------------------------------------------------------
+// Writes the NAND's /shared2/sys/SYSCONF if it has none, sets what the
+// options ask (-1: as the file says), and says whether the console is 16:9.
+struct SysconfOptions { int aspect = -1; int language = -1; };   // IPL.AR 0/1, IPL.LNG 0..6
+bool sysconf_prepare(const char* nand_root, const SysconfOptions& o);
+
 // ---- IOS (ios.cpp) ------------------------------------------------------------------
 void ios_init(const char* disc_root, const char* nand_root);
 void ios_ipc_write(uint32_t reg, uint32_t v);      // 0xCD000000-0xCD00000C

@@ -44,11 +44,15 @@ void video_set_lines(uint32_t lines);        // VI: lines of picture scanned out
 
 struct VideoOptions {
     bool enabled = true;
-    int scale = 1;                           // internal resolution: EFB x scale
+    int scale = 0;                           // internal resolution: EFB x scale; 0 = from the window's height
     int frames_ahead = 2;                    // frames the game may record before the renderer draws them
     const char* dump_dir = nullptr;          // PNGs of presented frames
     int dump_every = 60;                     // one PNG every N retraces
     double quit_after = 0;                   // seconds; 0 = run until the window closes
+    bool widescreen = false;                 // the console's screen is 16:9 (SYSCONF), else 4:3
+    bool fullscreen = false;                 // start fullscreen (borderless, at the desktop's mode)
+    int window_w = 0, window_h = 0;          // the window's size; 0 = 720 lines at the screen's shape
+    std::string keys;                        // the key file: the Remote's buttons on keys and mouse buttons
 };
 void video_configure(const VideoOptions& o);
 // The host's input as a Wii Remote (read by wpad.cpp): WPAD core button

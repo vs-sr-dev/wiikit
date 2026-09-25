@@ -9,7 +9,7 @@
 set(_rt ${CMAKE_CURRENT_LIST_DIR})
 add_library(wiikit_core OBJECT ${_rt}/core.cpp ${_rt}/mem.cpp)
 add_library(wiikit_stub OBJECT ${_rt}/services_stub.cpp)
-add_library(wiikit_hw OBJECT ${_rt}/os.cpp ${_rt}/hw.cpp ${_rt}/gx.cpp ${_rt}/ios.cpp
+add_library(wiikit_hw OBJECT ${_rt}/os.cpp ${_rt}/hw.cpp ${_rt}/gx.cpp ${_rt}/ios.cpp ${_rt}/sysconf.cpp
             ${_rt}/disc.cpp ${_rt}/boot.cpp ${_rt}/wpad.cpp ${_rt}/ax.cpp ${_rt}/audio.cpp
             ${_rt}/video.cpp ${_rt}/gxshader.cpp ${_rt}/gxtex.cpp)
 find_package(SDL3 REQUIRED CONFIG)

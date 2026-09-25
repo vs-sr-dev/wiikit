@@ -2,10 +2,15 @@
 //
 //     wiiboot EXTRACT_DIR [--nand DIR] [--fonts DIR] [--symbols symbols.tsv] [--mmio-log] [--watch SECONDS]
 //                         [--no-video] [--no-audio] [--scale N] [--frames-ahead N] [--dump DIR]
-//                         [--dump-every N] [--quit-after SECONDS]
+//                         [--dump-every N] [--quit-after SECONDS] [--aspect 16:9|4:3]
+//                         [--language en|fr|es|de|it|nl|ja] [--fullscreen] [--window WxH] [--keys FILE]
 //
 // EXTRACT_DIR comes from `python -m wiikit.disc GAME --extract`. The NAND
-// (saves, SYSCONF) is a host folder, EXTRACT_DIR/../nand by default. The
+// (saves, SYSCONF) is a host folder, EXTRACT_DIR/../nand by default; its
+// SYSCONF is written on the first run (16:9, English), and --aspect and
+// --language change it for this run and the next ones. The key map is
+// EXTRACT_DIR/../keys.txt unless --keys says otherwise; a missing one is
+// written with the defaults. The
 // boot ROM's fonts (font_western.bin, font_japanese.bin) and the DSP ROM's
 // resampling table (dsp_coef.bin) are looked for in EXTRACT_DIR/../fonts:
 // Dolphin's Sys/GC has free ones.
@@ -28,12 +33,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: wiiboot EXTRACT_DIR [--nand DIR] [--fonts DIR] [--symbols symbols.tsv] "
                              "[--mmio-log] [--watch SECONDS]\n"
                              "                            [--no-video] [--no-audio] [--scale N] [--frames-ahead N] "
-                             "[--dump DIR] [--dump-every N] [--quit-after SECONDS]\n");
+                             "[--dump DIR] [--dump-every N] [--quit-after SECONDS]\n"
+                             "                            [--aspect 16:9|4:3] [--language en|fr|es|de|it|nl|ja] "
+                             "[--fullscreen] [--window WxH] [--keys FILE]\n");
         return 2;
     }
     int watch = 0;
     bool audio = true;
     VideoOptions vo;
+    SysconfOptions so;
     std::string root = argv[1], nand = root + "/../nand", fonts = root + "/../fonts";
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--nand") && i + 1 < argc) nand = argv[++i];
@@ -48,11 +56,32 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--dump") && i + 1 < argc) vo.dump_dir = argv[++i];
         else if (!std::strcmp(argv[i], "--dump-every") && i + 1 < argc) vo.dump_every = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--quit-after") && i + 1 < argc) vo.quit_after = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--aspect") && i + 1 < argc) {
+            std::string a = argv[++i];
+            if (a == "16:9") so.aspect = 1;
+            else if (a == "4:3") so.aspect = 0;
+            else { std::fprintf(stderr, "wiiboot: --aspect is 16:9 or 4:3\n"); return 2; }
+        } else if (!std::strcmp(argv[i], "--language") && i + 1 < argc) {
+            static const char* codes[] = {"ja", "en", "de", "fr", "es", "it", "nl"};   // IPL.LNG's order
+            for (int l = 0; l < 7; ++l)
+                if (!std::strcmp(argv[i + 1], codes[l])) so.language = l;
+            if (so.language < 0) { std::fprintf(stderr, "wiiboot: --language is one of en fr es de it nl ja\n"); return 2; }
+            ++i;
+        } else if (!std::strcmp(argv[i], "--fullscreen")) vo.fullscreen = true;
+        else if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) vo.keys = argv[++i];
+        else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) {
+            if (std::sscanf(argv[++i], "%dx%d", &vo.window_w, &vo.window_h) != 2 || vo.window_w < 64 || vo.window_h < 48) {
+                std::fprintf(stderr, "wiiboot: --window is WIDTHxHEIGHT\n");
+                return 2;
+            }
+        }
         else { std::fprintf(stderr, "wiiboot: unknown option %s\n", argv[i]); return 2; }
     }
     std::setvbuf(stdout, nullptr, _IOLBF, 1 << 16);
     if (!mem_init()) rt_die("cannot reserve the guest address space");
+    if (vo.keys.empty()) vo.keys = root + "/../keys.txt";
     uint32_t entry = boot_disc(root.c_str());
+    vo.widescreen = sysconf_prepare(nand.c_str(), so);
     video_configure(vo);
     gx_init();
     hw_init();

@@ -11,7 +11,8 @@
 // become the frames VI shows, by address; to textures they are converted to
 // what the target format would decode to, and the game's later binds of that
 // address find them (gx.cpp). On each VI retrace the XFB that VI's top-field
-// register names is presented, letterboxed to 4:3.
+// register names is presented on a 4:3 or 16:9 screen (SYSCONF), as large as
+// the window allows.
 #include "video.h"
 #include "gl.h"
 #include "rt.h"
@@ -582,42 +583,123 @@ void write_png(const std::string& path, int w, int h, const uint8_t* rgba) {
 
 namespace {
 
+// Where the picture sits in a window of w x h (pixels or window units): the
+// TV's screen, 4:3 or 16:9 as SYSCONF says, as large as the window allows and
+// centred; of its 480 lines (NTSC) VI scans the XFB out over its active ones,
+// centred too (360 for a game letterboxing 16:9 on a 4:3 screen).
+struct Rect { float x, y, w, h; };
+Rect picture_rect(float w, float h) {
+    float aspect = opt.widescreen ? 16.0f / 9 : 4.0f / 3;
+    float sw = w, sh = w / aspect;
+    if (sh > h) { sh = h; sw = h * aspect; }
+    float ph = sh * (float)std::min<uint32_t>(vi_lines.load(), 480) / 480;
+    return {(w - sw) / 2, (h - ph) / 2, sw, ph};
+}
+
 // The Wii Remote on the mouse and the keyboard. The mouse over the picture
-// is the pointer; left button or Enter = A, right button or Backspace = B;
-// WASD or the arrows = the d-pad; Tab = +, Q = -; 1, 2 = 1, 2; Space or the
-// middle button = a shake. Home has no key: Esc opens the port's own menu
-// (video_run) instead of the Wii's.
+// is the pointer; the buttons come from a key file (--keys, keys.txt next to
+// the extracted disc by default), written with the defaults when there is
+// none. Home has no key: Esc opens the port's own menu (video_run) instead
+// of the Wii's; F11 and Alt+Enter switch fullscreen.
+struct Binding { SDL_Scancode key; uint32_t mouse; uint32_t bits; bool shake; };   // key or mouse button mask
+std::vector<Binding> bindings;
+
+const char* DEFAULT_KEYS =
+    "# wiiboot's keys: each Wii Remote button, then the keys and mouse buttons that press it.\n"
+    "# Keys by SDL's names (https://wiki.libsdl.org/SDL3/SDL_Scancode): A..Z, 0..9, Return,\n"
+    "# Space, Tab, Backspace, Left Shift, Up, Down, Left, Right, Keypad Enter, F1..F10...\n"
+    "# Mouse buttons: Mouse Left, Mouse Right, Mouse Middle, Mouse X1, Mouse X2.\n"
+    "# Fixed: Esc (the pause box), F11 and Alt+Enter (fullscreen). Delete the file for the defaults.\n"
+    "A     = Return, Keypad Enter, Mouse Left\n"
+    "B     = Backspace, Mouse Right\n"
+    "Up    = W, Up\n"
+    "Down  = S, Down\n"
+    "Left  = A, Left\n"
+    "Right = D, Right\n"
+    "Plus  = Tab\n"
+    "Minus = Q\n"
+    "1     = 1\n"
+    "2     = 2\n"
+    "Shake = Space, Mouse Middle\n";
+
+std::string trim(const std::string& t) {
+    size_t a = t.find_first_not_of(" \t\r"), b = t.find_last_not_of(" \t\r");
+    return a == std::string::npos ? std::string() : t.substr(a, b - a + 1);
+}
+
+void load_keys(const std::string& path) {
+    std::string text;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        char buf[4096];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        std::fclose(f);
+    } else {
+        text = DEFAULT_KEYS;
+        if (FILE* out = std::fopen(path.c_str(), "wb")) {
+            std::fputs(DEFAULT_KEYS, out);
+            std::fclose(out);
+            rt_log("video: wrote the default keys to %s", path.c_str());
+        }
+    }
+    struct Btn { const char* name; uint32_t bits; };
+    static const Btn buttons[] = {{"A", 0x0800}, {"B", 0x0400}, {"Up", 0x0008}, {"Down", 0x0004},
+                                  {"Left", 0x0001}, {"Right", 0x0002}, {"Plus", 0x0010}, {"Minus", 0x1000},
+                                  {"1", 0x0200}, {"2", 0x0100}, {"Shake", 0}};
+    static const Btn mice[] = {{"Mouse Left", SDL_BUTTON_LMASK}, {"Mouse Right", SDL_BUTTON_RMASK},
+                               {"Mouse Middle", SDL_BUTTON_MMASK}, {"Mouse X1", SDL_BUTTON_X1MASK},
+                               {"Mouse X2", SDL_BUTTON_X2MASK}};
+    bindings.clear();
+    size_t start = 0;
+    for (int line = 1; start < text.size(); ++line) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string l = trim(text.substr(start, end - start));
+        start = end + 1;
+        if (l.empty() || l[0] == '#') continue;
+        size_t eq = l.find('=');
+        const Btn* b = nullptr;
+        if (eq != std::string::npos)
+            for (const Btn& c : buttons)
+                if (SDL_strcasecmp(trim(l.substr(0, eq)).c_str(), c.name) == 0) b = &c;
+        if (!b) { rt_log("video: %s:%d: not a Remote button (A B Up Down Left Right Plus Minus 1 2 Shake)", path.c_str(), line); continue; }
+        std::string rest = l.substr(eq + 1);
+        for (size_t p = 0; p <= rest.size();) {
+            size_t q = rest.find(',', p);
+            if (q == std::string::npos) q = rest.size();
+            std::string name = trim(rest.substr(p, q - p));
+            p = q + 1;
+            if (name.empty()) continue;
+            Binding k{SDL_SCANCODE_UNKNOWN, 0, b->bits, b->bits == 0};
+            for (const Btn& m : mice)
+                if (SDL_strcasecmp(name.c_str(), m.name) == 0) k.mouse = m.bits;
+            if (!k.mouse) k.key = SDL_GetScancodeFromName(name.c_str());
+            if (!k.mouse && k.key == SDL_SCANCODE_UNKNOWN) { rt_log("video: %s:%d: no key named \"%s\"", path.c_str(), line, name.c_str()); continue; }
+            bindings.push_back(k);
+        }
+    }
+}
+
 void update_pad() {
-    struct K { SDL_Scancode k; uint32_t b; };
-    static const K keys[] = {{SDL_SCANCODE_RETURN, 0x0800}, {SDL_SCANCODE_KP_ENTER, 0x0800},
-                             {SDL_SCANCODE_BACKSPACE, 0x0400},
-                             {SDL_SCANCODE_A, 0x0001}, {SDL_SCANCODE_D, 0x0002},
-                             {SDL_SCANCODE_S, 0x0004}, {SDL_SCANCODE_W, 0x0008},
-                             {SDL_SCANCODE_LEFT, 0x0001}, {SDL_SCANCODE_RIGHT, 0x0002},
-                             {SDL_SCANCODE_DOWN, 0x0004}, {SDL_SCANCODE_UP, 0x0008},
-                             {SDL_SCANCODE_TAB, 0x0010}, {SDL_SCANCODE_Q, 0x1000},
-                             {SDL_SCANCODE_1, 0x0200}, {SDL_SCANCODE_2, 0x0100}};
     const bool* ks = SDL_GetKeyboardState(nullptr);
     PadState p;
-    for (const K& k : keys)
-        if (ks[k.k]) p.buttons |= k.b;
-    p.shake = ks[SDL_SCANCODE_SPACE];
+    bool alt = SDL_GetModState() & SDL_KMOD_ALT;           // Alt+Enter is fullscreen, nothing else
     float mx = 0, my = 0;
     SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-    if (mb & SDL_BUTTON_LMASK) p.buttons |= 0x0800;
-    if (mb & SDL_BUTTON_RMASK) p.buttons |= 0x0400;
-    if (mb & SDL_BUTTON_MMASK) p.shake = true;
+    for (const Binding& k : bindings) {
+        bool down = k.mouse ? (mb & k.mouse) != 0
+                            : ks[k.key] && !(alt && (k.key == SDL_SCANCODE_RETURN || k.key == SDL_SCANCODE_KP_ENTER));
+        if (!down) continue;
+        p.buttons |= k.bits;
+        if (k.shake) p.shake = true;
+    }
     int ww = 0, wh = 0;
     SDL_GetWindowSize(win, &ww, &wh);                        // mouse coordinates are in window units
     if (ww > 0 && wh > 0 && (SDL_GetWindowFlags(win) & SDL_WINDOW_MOUSE_FOCUS)) {
-        // -1..1 spans the picture as present() shows it: the 4:3 screen's
-        // width, and only the lines VI scans out (360 for a letterboxed 16:9),
-        // so that the game's cursor lands under the mouse
-        float fw = (float)ww, fh = fw * 3 / 4;
-        if (fh > (float)wh) { fh = (float)wh; fw = fh * 4 / 3; }
-        fh = fh * (float)std::min<uint32_t>(vi_lines.load(), 480) / 480;
-        p.x = (mx - ((float)ww - fw) / 2) / fw * 2 - 1;
-        p.y = (my - ((float)wh - fh) / 2) / fh * 2 - 1;
+        // -1..1 spans the picture as present() shows it, so that the game's
+        // cursor lands under the mouse
+        Rect r = picture_rect((float)ww, (float)wh);
+        p.x = (mx - r.x) / r.w * 2 - 1;
+        p.y = (my - r.y) / r.h * 2 - 1;
         p.pointer = p.x >= -1 && p.x <= 1 && p.y >= -1 && p.y <= 1;
     }
     // over the picture the game draws its own cursor, as on the Wii
@@ -675,13 +757,9 @@ void present() {
     if (it == xfbs.end()) it = xfbs.find(last_xfb);
     if (it != xfbs.end() && ww > 0 && wh > 0) {
         const Tex& t = it->second;
-        // the screen is 4:3 and 480 lines tall (NTSC); VI scans the XFB out
-        // over its active lines, centred: 360 of them for a letterboxed 16:9
-        int fw = ww, fh = ww * 3 / 4;
-        if (fh > wh) { fh = wh; fw = wh * 4 / 3; }
-        int lines = (int)std::min<uint32_t>(vi_lines.load(), 480);
-        int dw = fw, dh = fh * lines / 480;
-        int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
+        Rect r = picture_rect((float)ww, (float)wh);
+        int dx = (int)std::lround(r.x), dy = (int)std::lround(r.y);
+        int dw = (int)std::lround(r.w), dh = (int)std::lround(r.h);
         glNamedFramebufferTexture(copy_fbo, GL_COLOR_ATTACHMENT0, t.name, 0);
         glBlitNamedFramebuffer(copy_fbo, 0, 0, 0, t.w, t.h, dx, dy + dh, dx + dw, dy,   // top row first
                                GL_COLOR_BUFFER_BIT, GL_LINEAR);
@@ -822,7 +900,13 @@ void video_run(const char* title) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     bool debug = std::getenv("WIIKIT_GLDEBUG") != nullptr;
     if (debug) SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
-    win = SDL_CreateWindow(title, 960, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    // 720 lines at the screen's shape unless --window says otherwise;
+    // fullscreen is SDL's borderless one at the desktop's mode: the other
+    // windows stay, and the picture keeps its shape with bars at the sides
+    int w0 = opt.window_w ? opt.window_w : (opt.widescreen ? 1280 : 960), h0 = opt.window_h ? opt.window_h : 720;
+    SDL_WindowFlags wflags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+    if (opt.fullscreen) wflags |= SDL_WINDOW_FULLSCREEN;
+    win = SDL_CreateWindow(title, w0, h0, wflags);
     if (!win) rt_die("video: SDL_CreateWindow: %s", SDL_GetError());
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
     if (!ctx) rt_die("video: no OpenGL 4.5 context: %s", SDL_GetError());
@@ -835,6 +919,17 @@ void video_run(const char* title) {
         glDebugMessageCallback(gl_debug, nullptr);
     }
     wake = SDL_CreateSemaphore(0);
+    load_keys(opt.keys.empty() ? std::string("keys.txt") : opt.keys);
+    if (opt.scale <= 0) {
+        // enough EFB lines for the screen's height at the window's first
+        // size: 3 for 1080 or 1440 lines, 2 for 720
+        int ww = 0, wh = 0;
+        SDL_GetWindowSizeInPixels(win, &ww, &wh);
+        float aspect = opt.widescreen ? 16.0f / 9 : 4.0f / 3;
+        float sh = std::min((float)wh, (float)ww / aspect);
+        S = std::clamp((int)std::ceil(sh / 480 - 0.01f), 1, 4);
+    }
+    rt_log("video: internal resolution x%d (EFB %d x %d)", S, EFB_W * S, EFB_H * S);
     setup();
 
     auto t0 = Clock::now(), t_title = t0;
@@ -846,6 +941,12 @@ void video_run(const char* title) {
         bool quit = false;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
+            // F11 or Alt+Enter: fullscreen and back
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                (e.key.scancode == SDL_SCANCODE_F11 ||
+                 ((e.key.scancode == SDL_SCANCODE_RETURN || e.key.scancode == SDL_SCANCODE_KP_ENTER) &&
+                  (e.key.mod & SDL_KMOD_ALT))))
+                SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
             // Esc: the port's menu in place of the Wii's Home Button menu.
             // While it is open the renderer stops, and the game with it as
             // soon as its FIFO record queue is full.
