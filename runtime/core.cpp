@@ -84,6 +84,32 @@ void ppc_io_write(uint32_t a, uint32_t v, int size) {
     }
 }
 
+// The locked cache's DMA engine (LCLoadData, LCStoreData): writing DMA_L with
+// its trigger bit moves (DMA_U length << 2 | DMA_L length) 32-byte lines,
+// 0 meaning 128, between memory and the locked cache, in the direction of
+// DMA_L's load bit. It completes at once: the trigger reads back clear and
+// HID2's queue length stays 0, so LCQueueWait never waits. A store to the
+// gather pipe's address feeds the GX FIFO, as NW4R's display-list path does.
+uint32_t ppc_lc_dma(uint32_t dma_u, uint32_t dma_l) {
+    if (!(dma_l & 2)) return dma_l;
+    uint32_t lines = (dma_u & 0x1F) << 2 | (dma_l >> 2 & 3);
+    if (!lines) lines = 128;
+    uint32_t mem = dma_u & 0xFFFFFFE0u, lc = dma_l & 0xFFFFFFE0u, n = lines * 32;
+    uint8_t* cache = host(lc);
+    if (dma_l & 0x10) {                                          // memory -> locked cache
+        std::memcpy(cache, host(virt(mem & 0x1FFFFFFFu)), n);
+    } else if ((mem & 0x0FFFF000u) == 0x0C008000u) {             // locked cache -> the GX FIFO
+        for (uint32_t i = 0; i < n; i += 4) {
+            uint32_t w;
+            std::memcpy(&w, cache + i, 4);
+            ppc_mmio_write(0xCC008000u, PPC_BSWAP32(w), 4);
+        }
+    } else {                                                     // locked cache -> memory
+        std::memcpy(host(virt(mem & 0x1FFFFFFFu)), cache, n);
+    }
+    return dma_l & ~2u;
+}
+
 void ppc_lswx(PPCContext& c, int rd, uint32_t ea, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) {
         int r = (rd + i / 4) & 31;

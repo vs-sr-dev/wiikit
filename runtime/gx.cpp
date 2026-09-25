@@ -44,6 +44,23 @@ std::vector<uint8_t> tmem(1 << 20);                // texture memory: only palet
 
 struct Stats { uint64_t cmds, draws, verts, dls, copies, frames, done, uploads; } st;
 
+// WIIKIT_GXTRACE=N: every command of frame N (counted in XFB copies) to gxtrace_N.txt
+FILE* trace_file() {
+    static long want = std::getenv("WIIKIT_GXTRACE") ? std::atol(std::getenv("WIIKIT_GXTRACE")) : -1;
+    static FILE* f = nullptr;
+    if (want < 0 || (long)st.frames != want) {
+        if (f && (long)st.frames > want) { std::fclose(f); f = nullptr; want = -1; }
+        return nullptr;
+    }
+    if (!f) {
+        char name[64];
+        std::snprintf(name, sizeof name, "gxtrace_%ld.txt", want);
+        f = std::fopen(name, "w");
+    }
+    return f;
+}
+#define TRACE(...) do { if (FILE* tf_ = trace_file()) std::fprintf(tf_, __VA_ARGS__); } while (0)
+
 // CP control: 0 GP read enable, 1 breakpoint enable, 2/3 overflow/underflow
 // interrupt enable, 4 GP link enable, 5 breakpoint interrupt enable
 bool linked() { return (cp_reg16[1] & 0x11) == 0x11; }
@@ -394,6 +411,7 @@ void bp_write(uint32_t v) {
     if (reg == 0xFE) { bp_mask = val; return; }
     bp[reg] = (bp[reg] & ~bp_mask) | (val & bp_mask);
     bp_mask = 0xFFFFFF;
+    TRACE("BP %02X %06X\n", reg, bp[reg]);
     switch (reg) {
     case 0x45: pe_ctrl |= 8; ++st.done; os_raise(); return;          // PE_DONE: draw done
     case 0x47: pe_token = (uint16_t)val; return;                      // token
@@ -421,6 +439,11 @@ void xf_load(uint32_t addr, uint32_t n, const uint8_t* src) {
     if (addr >= 0x1058) return;
     if (addr + n > 0x1058) n = 0x1058 - addr;
     for (uint32_t i = 0; i < n; ++i) xf[addr + i] = be32(src + 4 * i);
+    if (FILE* tf = trace_file()) {
+        std::fprintf(tf, "XF %04X %u:", addr, n);
+        for (uint32_t i = 0; i < n && i < 16; ++i) { float fv; std::memcpy(&fv, &xf[addr + i], 4); std::fprintf(tf, " %08X(%g)", xf[addr + i], fv); }
+        std::fprintf(tf, "\n");
+    }
     if (video) {
         put<uint8_t>(VC_XF);
         put<uint16_t>((uint16_t)addr);
@@ -434,6 +457,7 @@ size_t parse(const uint8_t* p, size_t n, bool in_dl);
 
 void call_dl(uint32_t addr, uint32_t size) {
     ++st.dls;
+    TRACE("DL %08X %u\n", addr, size);
     if (!mem_ok(addr & 0x1FFFFFFF, size)) { warn_once("display list outside memory at", addr); return; }
     const uint8_t* p = host(virt(addr));
     size_t off = 0;
@@ -452,6 +476,7 @@ size_t parse(const uint8_t* p, size_t n, bool in_dl) {
     case 0x08:
         if (n < 6) return 0;
         cp[p[1]] = be32(p + 2);
+        TRACE("CP %02X %08X\n", p[1], cp[p[1]]);
         return 6;
     case 0x10: {
         if (n < 5) return 0;
@@ -487,6 +512,7 @@ size_t parse(const uint8_t* p, size_t n, bool in_dl) {
         if (n < len) return 0;
         ++st.draws;
         st.verts += count;
+        TRACE("DRAW %02X fmt %d n %u%s\n", op & 0xF8, op & 7, count, in_dl ? " (dl)" : "");
         if (video && count) {
             if (bp[0xF1] >> 21 & 7) warn_once("fog (not drawn), type", bp[0xF1] >> 21 & 7);
             if (bp[0xF4] >> 2 & 3) warn_once("Z texture (not drawn), op", bp[0xF4] >> 2 & 3);

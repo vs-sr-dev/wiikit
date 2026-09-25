@@ -68,6 +68,7 @@ void     ppc_mtdec(uint32_t v);
 uint32_t ppc_mfdec();
 void     ppc_lswx(PPCContext& c, int rd, uint32_t ea, uint32_t n);
 void     ppc_stswx(PPCContext& c, int rs, uint32_t ea, uint32_t n);
+uint32_t ppc_lc_dma(uint32_t dma_u, uint32_t dma_l);        // mtspr DMA_L: the locked cache's DMA; returns DMA_L
 
 // Replace a named function (from the hook list the code was generated with);
 // returns the recompiled original, or nullptr if the executable lacks it.

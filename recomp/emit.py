@@ -305,6 +305,8 @@ def emit(ins, addr, fn):
             return [f"ppc_mtdec(c.r[{S}]);"]
         if n in (284, 285):               # TBL, TBU
             return [f"ppc_mttb({n - 284}, c.r[{S}]);"]
+        if n == 923:                      # DMA_L: starts the locked cache's DMA
+            return [f"c.spr[923] = ppc_lc_dma(c.spr[922], c.r[{S}]);"]
         dst = {8: "c.lr", 9: "c.ctr"}.get(n) or (f"c.gqr[{n - 912}]" if 912 <= n < 920 else f"c.spr[{n}]")
         return [f"{dst} = c.r[{S}];"]
     if op == "mftb":

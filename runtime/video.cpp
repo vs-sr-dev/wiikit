@@ -227,11 +227,30 @@ void efb_clear(int x, int y, int w, int h) {
     glClear((cu || au ? GL_COLOR_BUFFER_BIT : 0) | (zu ? GL_DEPTH_BUFFER_BIT : 0));
 }
 
+// WIIKIT_EFBDUMP=N: the EFB as PNGs during frame N (counted in XFB copies):
+// before each EFB copy, and every WIIKIT_EFBDUMP_EVERY draws (debugging)
+long efb_dump_frame = std::getenv("WIIKIT_EFBDUMP") ? std::atol(std::getenv("WIIKIT_EFBDUMP")) : -1;
+long efb_dump_every = std::getenv("WIIKIT_EFBDUMP_EVERY") ? std::atol(std::getenv("WIIKIT_EFBDUMP_EVERY")) : 0;
+bool efb_dumping() { return (long)cnt.frames == efb_dump_frame; }
+void efb_dump(const char* tag) {
+    static int k = 0;
+    std::vector<uint8_t> px((size_t)EFB_W * S * EFB_H * S * 4);   // top row first, as the EFB is kept
+    glGetTextureImage(efb_col, 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLsizei)px.size(), px.data());
+    char name[160];
+    std::snprintf(name, sizeof name, "efb_%ld_%04d_%s.png", efb_dump_frame, k++, tag);
+    write_png(name, EFB_W * S, EFB_H * S, px.data());
+}
+
 void efb_copy(uint32_t v) {
     int x = (int)(bp[0x49] & 0x3FF), y = (int)(bp[0x49] >> 10 & 0x3FF);
     int w = (int)(bp[0x4A] & 0x3FF) + 1, h = (int)(bp[0x4A] >> 10 & 0x3FF) + 1;
     uint32_t dest = (bp[0x4B] & 0xFFFFFF) << 5;
     glDisable(GL_SCISSOR_TEST);
+    if (efb_dumping()) {
+        char tag[64];
+        std::snprintf(tag, sizeof tag, "copy_%06X_%d_%d_%dx%d", v, x, y, w, h);
+        efb_dump(tag);
+    }
     if (v >> 14 & 1) {                                           // to the XFB
         Tex& t = xfbs[dest];
         ensure_tex(t, w * S, h * S, 1);
@@ -460,6 +479,26 @@ void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
     set_ps_uniforms();
     bind_textures();
 
+    if (efb_dumping() && std::getenv("WIIKIT_DRAWLOG")) {         // debugging: where each draw lands
+        static FILE* lf = std::fopen("drawlog.txt", "w");
+        const GVtx& v0 = *reinterpret_cast<const GVtx*>(vtx);
+        uint32_t pm = v0.mtx[0] * 4u;
+        float pos[3];
+        for (int r = 0; r < 3; ++r)
+            pos[r] = fx(pm + r * 4) * v0.pos[0] + fx(pm + r * 4 + 1) * v0.pos[1] + fx(pm + r * 4 + 2) * v0.pos[2] + fx(pm + r * 4 + 3);
+        float c[4];
+        if (xf[0x1026] == 0) { c[0] = fx(0x1020) * pos[0] + fx(0x1021) * pos[2]; c[1] = fx(0x1022) * pos[1] + fx(0x1023) * pos[2];
+                               c[2] = fx(0x1024) * pos[2] + fx(0x1025); c[3] = -pos[2]; }
+        else { c[0] = fx(0x1020) * pos[0] + fx(0x1021); c[1] = fx(0x1022) * pos[1] + fx(0x1023);
+               c[2] = fx(0x1024) * pos[2] + fx(0x1025); c[3] = 1; }
+        std::fprintf(lf, "%ld prim %02X n %u zm %X cm %X pix %X at %X ztex %X fog %X | vp %g %g %g %g %g %g | proj%u %g %g %g %g %g %g | "
+                     "mtx %u obj %g %g %g eye %g %g %g ndc %g %g w %g | tev %u chans %u\n",
+                     (long)cnt.draws, prim, n, bp[0x40], bp[0x41], bp[0x43], bp[0xF3], bp[0xF4], bp[0xF1],
+                     fx(0x101A), fx(0x101B), fx(0x101C), fx(0x101D), fx(0x101E), fx(0x101F),
+                     xf[0x1026], fx(0x1020), fx(0x1021), fx(0x1022), fx(0x1023), fx(0x1024), fx(0x1025),
+                     v0.mtx[0], v0.pos[0], v0.pos[1], v0.pos[2], pos[0], pos[1], pos[2], c[0] / c[3], c[1] / c[3], c[3],
+                     (bp[0x00] >> 10 & 15) + 1, xf[0x1009] & 3);
+    }
     size_t bytes = (size_t)n * sizeof(GVtx);
     if (vbo_off + bytes > VBO_CAP) { glInvalidateBufferData(vbo); vbo_off = 0; }
     glNamedBufferSubData(vbo, (GLintptr)vbo_off, (GLsizeiptr)bytes, vtx);
@@ -475,6 +514,14 @@ void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
     case 0xA8: glDrawArrays(GL_LINES, base, (GLsizei)n); break;
     case 0xB0: glDrawArrays(GL_LINE_STRIP, base, (GLsizei)n); break;
     default: glDrawArrays(GL_POINTS, base, (GLsizei)n); break;
+    }
+    if (efb_dump_every && efb_dumping()) {
+        static long k = 0;
+        if (++k % efb_dump_every == 0) {
+            char tag[32];
+            std::snprintf(tag, sizeof tag, "draw%05ld", k);
+            efb_dump(tag);
+        }
     }
 }
 
