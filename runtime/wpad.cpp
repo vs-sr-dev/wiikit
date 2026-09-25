@@ -21,7 +21,7 @@ namespace {
 constexpr uint32_t WPAD_STATE_SETUP = 3;
 constexpr int32_t WPAD_ERR_NO_CONTROLLER = -1;
 constexpr uint32_t WPAD_DEV_CORE = 0, WPAD_DEV_NOT_FOUND = 253;
-constexpr uint32_t KPAD_STATUS_SIZE = 0xF0;          // this SDK's KPADStatus
+uint32_t kpad_status_size = 0xF0;                   // the SDK's KPADStatus: 0xF0 in later SDKs, 0x84 in 2006-07's
 
 void ret(PPCContext& c, uint32_t v) { c.r[3] = v; }
 void stf(uint32_t a, float f) { uint32_t u; std::memcpy(&u, &f, 4); st32(a, u); }
@@ -42,7 +42,7 @@ void hle_KPADRead(PPCContext& c) {
     uint32_t chan = c.r[3], s = c.r[4], len = c.r[5];
     if (chan != 0 || !s || !len) { ret(c, 0); return; }
     PadState p = video_pad();
-    for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) st32(s + i, 0);
+    for (uint32_t i = 0; i < kpad_status_size; i += 4) st32(s + i, 0);
     st32(s + 0x00, p.buttons);                        // hold
     st32(s + 0x04, p.buttons & ~prev_hold);           // trig
     st32(s + 0x08, prev_hold & ~p.buttons);           // release
@@ -79,6 +79,8 @@ void hle_KPADRead(PPCContext& c) {
 void hle_KPADGetSensorHeight(PPCContext& c) { c.f[1] = c.ps1[1] = 0.0; }
 
 }  // namespace
+
+void wpad_set_kpad_status_size(uint32_t size) { kpad_status_size = size; }
 
 void wpad_install() {
     auto nop = [](PPCContext&) {};

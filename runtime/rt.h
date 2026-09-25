@@ -59,6 +59,9 @@ extern bool g_mmio_log;                            // log every first access to 
 
 // ---- the Wii Remote (wpad.cpp) -------------------------------------------------------
 void wpad_install();                               // WPAD/KPAD hooks
+// KPADStatus's size in the game's SDK (KPADRead fills whole samples): 0xF0
+// by default; the SDKs of 2006-07 have 0x84. The fields up to 0x5F agree.
+void wpad_set_kpad_status_size(uint32_t size);
 
 // ---- audio (ax.cpp, audio.cpp) --------------------------------------------------------
 void ax_command_list(uint32_t addr);               // the AX micro-code: mix one frame
