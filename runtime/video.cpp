@@ -211,8 +211,12 @@ void main() {
     case 7: o = vec4(c.a); break;                                         // A8
     case 9: o = vec4(c.g); break;                                         // G8 / Z8M
     case 10: o = vec4(c.b); break;                                        // B8 / Z8L
-    case 11: o = vec4(c.ggg, c.r); break;                                 // RG8
-    case 12: o = vec4(c.bbb, c.g); break;                                 // GB8 / Z16L
+    // RG8 and GB8 are two channels in an IA8-shaped texture: the second
+    // channel first in memory, so it is the alpha (read as IA8: RG8 is
+    // I = R, A = G; GB8 is I = G, A = B). A colour-grading pass reads G as
+    // the intensity and B as the alpha of a GB8 copy, as Dolphin encodes it.
+    case 11: o = vec4(c.rrr, c.g); break;                                 // RG8
+    case 12: o = u_mode.y != 0 ? vec4(c.bbb, c.g) : vec4(c.ggg, c.b); break;   // Z16L / GB8
     default: o = c; break;                                                // RGBA8 / Z24X8
     }
 }
