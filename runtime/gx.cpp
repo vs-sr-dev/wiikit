@@ -97,6 +97,11 @@ uint8_t* grow(size_t n) {
     return rec.data() + o;
 }
 template <class T> void put(T v) { std::memcpy(grow(sizeof v), &v, sizeof v); }
+// Draws of one primitive in a row with nothing between them (no register,
+// matrix or texture written) reach the renderer as one VC_DRAW of several
+// pieces, drawn with one call. Skinned models come as thousands of strips of
+// 4 to 10 vertices a frame, in runs between their matrix loads.
+size_t draw_hdr = 0, draw_end = SIZE_MAX;          // the last VC_DRAW's offset; the record's size after it
 // The record is handed over after the burst, outside the hardware lock
 // (gx_submit_pending): video_submit may wait for the renderer, and while it
 // waits the clock thread must still start the AI's audio blocks on time.
@@ -539,19 +544,37 @@ size_t parse(const uint8_t* p, size_t n, bool in_dl) {
             } else {
                 sync_textures();
             }
-            put<uint8_t>(VC_DRAW);
-            put<uint8_t>(op & 0xF8);
+            // VC_DRAW, prim, vertex flags, pieces (u32), then each piece: n (u32), n vertices
+            bool extend = rec.size() == draw_end && rec[draw_hdr + 1] == (op & 0xF8);
+            if (!extend) {
+                draw_hdr = rec.size();
+                put<uint8_t>(VC_DRAW);
+                put<uint8_t>(op & 0xF8);
+                put<uint8_t>(0);
+                put<uint32_t>(0);
+            }
             size_t at = rec.size();
-            put<uint8_t>(0);
             put<uint32_t>(count);
             GVtx* out = reinterpret_cast<GVtx*>(grow(count * sizeof(GVtx)));
+            uint8_t fl;
             if (g_vperf_on) {
                 auto t0 = std::chrono::steady_clock::now();
-                rec[at] = decode_vertices(f, p + 3, count, out);
+                fl = decode_vertices(f, p + 3, count, out);
                 g_vperf.vtx += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
             } else {
-                rec[at] = decode_vertices(f, p + 3, count, out);
+                fl = decode_vertices(f, p + 3, count, out);
             }
+            if (extend && rec[draw_hdr + 2] != fl) {      // other attributes: a draw of its own
+                const uint8_t hdr[7] = {VC_DRAW, (uint8_t)(op & 0xF8), 0, 0, 0, 0, 0};
+                rec.insert(rec.begin() + (ptrdiff_t)at, hdr, hdr + sizeof hdr);
+                draw_hdr = at;
+            }
+            rec[draw_hdr + 2] = fl;
+            uint32_t pieces;
+            std::memcpy(&pieces, &rec[draw_hdr + 3], 4);
+            ++pieces;
+            std::memcpy(&rec[draw_hdr + 3], &pieces, 4);
+            draw_end = rec.size();
             flush(false);
         }
         return len;
@@ -593,7 +616,7 @@ void gx_submit_pending() {
     submit_pending = false;
     while (!rec.empty()) {
         int frames = rec_frames;
-        if (video_submit(rec, frames, 1)) { rec_frames = 0; break; }
+        if (video_submit(rec, frames, 1)) { rec_frames = 0; draw_end = SIZE_MAX; break; }
         if (t_ppc && g_ppc_pending.load(std::memory_order_relaxed)) ppc_poll(*t_ppc);
     }
 }

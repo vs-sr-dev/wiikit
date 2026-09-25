@@ -25,6 +25,8 @@
     X(PFNGLPIXELSTOREIPROC, glPixelStorei)                                                          \
     X(PFNGLDRAWARRAYSPROC, glDrawArrays)                                                            \
     X(PFNGLDRAWELEMENTSBASEVERTEXPROC, glDrawElementsBaseVertex)                                    \
+    X(PFNGLMULTIDRAWARRAYSPROC, glMultiDrawArrays)                                                  \
+    X(PFNGLMULTIDRAWELEMENTSBASEVERTEXPROC, glMultiDrawElementsBaseVertex)                          \
     X(PFNGLCLIPCONTROLPROC, glClipControl)                                                          \
     X(PFNGLDEBUGMESSAGECALLBACKPROC, glDebugMessageCallback)                                        \
     X(PFNGLCREATESHADERPROC, glCreateShader)                                                        \

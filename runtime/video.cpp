@@ -422,7 +422,14 @@ void bind_textures() {
     }
 }
 
-void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
+// A VC_DRAW's pieces (each n, then n vertices), drawn with one call.
+void draw(uint8_t prim, uint8_t vflags, const uint8_t* pieces, uint32_t npieces) {
+    uint32_t n = 0;
+    const uint8_t* vtx = pieces + 4;                           // the first vertex
+    for (uint32_t i = 0, k; i < npieces; ++i) {
+        std::memcpy(&k, pieces + (size_t)n * sizeof(GVtx) + 4 * i, 4);
+        n += k;
+    }
     uint32_t cull = bp[0x00] >> 14 & 3;
     bool tri = prim < 0xA8;
     if (tri && cull == 3) return;
@@ -525,20 +532,40 @@ void draw(uint8_t prim, uint8_t vflags, const uint8_t* vtx, uint32_t n) {
             vbo_fence[q] = nullptr;
         }
     }
-    std::memcpy(vbo_ptr + vbo_off, vtx, bytes);
     GLint base = (GLint)(vbo_off / sizeof(GVtx));
-    vbo_off += bytes;
-    switch (prim) {
-    case 0x80: case 0x88:
-        glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)(n / 4 * 6), GL_UNSIGNED_INT, nullptr, base);
-        break;
-    case 0x90: glDrawArrays(GL_TRIANGLES, base, (GLsizei)n); break;
-    case 0x98: glDrawArrays(GL_TRIANGLE_STRIP, base, (GLsizei)n); break;
-    case 0xA0: glDrawArrays(GL_TRIANGLE_FAN, base, (GLsizei)n); break;
-    case 0xA8: glDrawArrays(GL_LINES, base, (GLsizei)n); break;
-    case 0xB0: glDrawArrays(GL_LINE_STRIP, base, (GLsizei)n); break;
-    default: glDrawArrays(GL_POINTS, base, (GLsizei)n); break;
+    static std::vector<GLint> firsts;
+    static std::vector<GLsizei> counts;
+    static std::vector<const void*> offsets;
+    firsts.clear();
+    counts.clear();
+    for (uint32_t i = 0, at = 0, k; i < npieces; ++i) {       // the pieces' vertices, one after another
+        std::memcpy(&k, pieces, 4);
+        std::memcpy(vbo_ptr + vbo_off + (size_t)at * sizeof(GVtx), pieces + 4, (size_t)k * sizeof(GVtx));
+        firsts.push_back(base + (GLint)at);
+        counts.push_back((GLsizei)k);
+        pieces += 4 + (size_t)k * sizeof(GVtx);
+        at += k;
     }
+    vbo_off += bytes;
+    GLenum mode;
+    switch (prim) {
+    case 0x80: case 0x88:                                      // quads: a static index buffer of their triangles
+        for (GLsizei& k : counts) k = k / 4 * 6;
+        offsets.assign(npieces, nullptr);
+        if (npieces == 1) glDrawElementsBaseVertex(GL_TRIANGLES, counts[0], GL_UNSIGNED_INT, nullptr, base);
+        else glMultiDrawElementsBaseVertex(GL_TRIANGLES, counts.data(), GL_UNSIGNED_INT, offsets.data(),
+                                           (GLsizei)npieces, firsts.data());
+        mode = 0;
+        break;
+    case 0x90: mode = GL_TRIANGLES; break;
+    case 0x98: mode = GL_TRIANGLE_STRIP; break;
+    case 0xA0: mode = GL_TRIANGLE_FAN; break;
+    case 0xA8: mode = GL_LINES; break;
+    case 0xB0: mode = GL_LINE_STRIP; break;
+    default: mode = GL_POINTS; break;
+    }
+    if (mode && npieces == 1) glDrawArrays(mode, base, counts[0]);
+    else if (mode) glMultiDrawArrays(mode, firsts.data(), counts.data(), (GLsizei)npieces);
     if (efb_dump_every && efb_dumping()) {
         static long k = 0;
         if (++k % efb_dump_every == 0) {
@@ -568,9 +595,12 @@ void exec(const std::vector<uint8_t>& data) {
         }
         case VC_DRAW: {
             uint8_t prim = rd<uint8_t>(p), fl = rd<uint8_t>(p);
-            uint32_t n = rd<uint32_t>(p);
-            draw(prim, fl, p, n);
-            p += (size_t)n * sizeof(GVtx);
+            uint32_t pieces = rd<uint32_t>(p);
+            draw(prim, fl, p, pieces);
+            for (uint32_t i = 0; i < pieces; ++i) {
+                uint32_t n = rd<uint32_t>(p);
+                p += (size_t)n * sizeof(GVtx);
+            }
             break;
         }
         case VC_TEXUP: {
