@@ -29,6 +29,8 @@ WPADGetStatus
 WPADProbe
 WPADDisconnect
 WPADSetAutoSamplingBuf
+WPADGetLatestIndexInBuf
+WPADRead
 WPADSetCallbackByKPAD
 WPADIsUsedCallbackByKPAD
 WPADSetConnectCallback
@@ -62,3 +64,4 @@ KPADDisableDPD
 KPADGetSensorHeight
 KPADIsEnableAimingMode
 __VIRetraceHandler     # VI's interrupt: the Remotes' connect and extension callbacks are called after it
+kpad_wpad_status       # (chan, buf, dev) -> buf: the 2007 KPAD's copy of its WPAD samples of one device; no symbol names it, ports give it this name

@@ -15,7 +15,9 @@
 // A game that plays with the Classic Controller (wpad_set_classic) finds one
 // on each channel that has a Classic from video.cpp (video_classic: channel 0
 // the keyboard and the first pad, the others the pads plugged in), in the
-// KPAD status's ex_status, the Remote holding it pointing nowhere.
+// KPAD status's ex_status, the Remote holding it pointing nowhere, and in
+// WPAD's own samples (WPADRead, the auto-sampling ring, and the 2007 KPAD's
+// copy of them) as a WPADCLStatus.
 //
 // Connections. A game may learn of Remotes only from the connect callbacks
 // (KPAD's or WPAD's), and of extensions from WPAD's extension callback, as
@@ -30,6 +32,7 @@
 // channel's controller comes or goes.
 #include "rt.h"
 #include "video.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -189,6 +192,84 @@ void hle_KPADReadEx(PPCContext& c) {
 
 void hle_KPADGetSensorHeight(PPCContext& c) { c.f[1] = c.ps1[1] = 0.0; }
 
+// ---- WPAD's own samples ----------------------------------------------------------------------------
+// Below KPAD a Remote's sample is a WPADStatus (0x2A bytes), a WPADFSStatus
+// with the Nunchuk (0x32) or a WPADCLStatus with the Classic (0x36). Games
+// read them with WPADRead, from a ring WPAD fills (WPADSetAutoSamplingBuf,
+// the newest at WPADGetLatestIndexInBuf), or, in the 2007 KPAD, through
+// kpad_wpad_status: KPAD's copy of the samples of one device into the
+// caller's ring of 16. Here the newest sample is always at index 0, written
+// when read.
+constexpr uint32_t kStatusSize[3] = {0x2A, 0x32, 0x36};   // by device: core, Nunchuk, Classic
+
+struct Ring { uint32_t buf = 0, len = 0; };
+Ring rings[4];
+
+// A stick's WPAD reading: the 2007 SDK's KPAD reads 60..308 along the radius
+// as its travel (clamp_stick_circle), 30..180 as a trigger's; the host's
+// deflection is put back where KPAD would read it as the same value.
+void st_stick(uint32_t a, float x, float y) {
+    float r = std::sqrt(x * x + y * y), k = r > 0 ? (60.0f + 248.0f * std::min(r, 1.0f)) / r : 0;
+    st16(a, (uint16_t)(int16_t)std::lround(x * k));
+    st16(a + 2, (uint16_t)(int16_t)std::lround(y * k));
+}
+uint8_t trigger(float t) { return t > 0 ? (uint8_t)std::lround(30.0f + 150.0f * std::min(t, 1.0f)) : 0; }
+
+// The channel's sample as its device gives it: the Remote still, no sensor-bar
+// point seen, its buttons the host's on channel 0 unless it holds a Classic.
+uint32_t write_status(uint32_t chan, uint32_t s) {
+    bool here = present(chan);
+    uint32_t dev = !here ? WPAD_DEV_NOT_FOUND : classic_game ? WPAD_DEV_CLASSIC : WPAD_DEV_CORE;
+    uint32_t size = kStatusSize[dev == WPAD_DEV_CLASSIC ? 2 : 0];
+    for (uint32_t i = 0; i < size; i += 2) st16(s + i, 0);
+    if (!here) {
+        st8(s + 0x28, (uint8_t)dev);
+        st8(s + 0x29, (uint8_t)WPAD_ERR_NO_CONTROLLER);
+        return dev;
+    }
+    if (chan == 0 && !classic_game) st16(s + 0x00, (uint16_t)video_pad().buttons);
+    st8(s + 0x28, (uint8_t)dev);                      // dev, err: none
+    if (dev == WPAD_DEV_CLASSIC) {
+        ClassicState k = video_classic((int)chan);
+        if (classic_filter) classic_filter((int)chan, k);
+        st16(s + 0x2A, (uint16_t)k.buttons);          // clButton: KPAD's Classic bits are WPAD's
+        st_stick(s + 0x2C, k.lx, k.ly);               // clLStickX, Y
+        st_stick(s + 0x30, k.rx, k.ry);               // clRStickX, Y
+        st8(s + 0x34, trigger(k.lt));                 // clTriggerL, R
+        st8(s + 0x35, trigger(k.rt));
+    }
+    return dev;
+}
+
+void hle_WPADRead(PPCContext& c) {                   // (chan, void* status)
+    deliver(c);
+    if (c.r[3] < 4 && c.r[4]) write_status(c.r[3], c.r[4]);
+}
+
+void hle_WPADSetAutoSamplingBuf(PPCContext& c) {     // (chan, void* buf, u32 len)
+    if (c.r[3] < 4) rings[c.r[3]] = {c.r[4], c.r[5]};
+}
+
+void hle_WPADGetLatestIndexInBuf(PPCContext& c) {    // (chan) -> the newest sample's index
+    deliver(c);
+    uint32_t chan = c.r[3];
+    if (chan < 4 && rings[chan].buf && rings[chan].len) write_status(chan, rings[chan].buf);
+    ret(c, 0);
+}
+
+// kpad_wpad_status(chan, buf, dev) -> buf: 16 samples of the channel's
+// device, if it is `dev`, the newest at WPADGetLatestIndexInBuf (0).
+void hle_kpad_wpad_status(PPCContext& c) {
+    deliver(c);
+    uint32_t chan = c.r[3], buf = c.r[4], want = c.r[5];
+    if (chan < 4 && buf && want < 3) {
+        uint32_t dev = present(chan) ? (classic_game ? WPAD_DEV_CLASSIC : WPAD_DEV_CORE) : WPAD_DEV_NOT_FOUND;
+        if (dev == want)
+            for (uint32_t i = 0; i < 16; ++i) write_status(chan, buf + i * kStatusSize[want]);
+    }
+    ret(c, buf);
+}
+
 }  // namespace
 
 void wpad_set_kpad_status_size(uint32_t size) { kpad_status_size = size; }
@@ -200,8 +281,7 @@ void wpad_install() {
     auto zero = [](PPCContext& c) { c.r[3] = 0; };
     auto no_controller = [](PPCContext& c) { c.r[3] = (uint32_t)WPAD_ERR_NO_CONTROLLER; };
     // set-up and state
-    for (const char* n : {"WPADInit", "WPADRegisterAllocator", "WPADDisconnect", "WPADSetAutoSamplingBuf",
-                          "WPADSetCallbackByKPAD", "WPADSetSpeakerVolume", "KPADInit", "KPADInitEx", "KPADReset",
+    for (const char* n : {"WPADInit", "WPADRegisterAllocator", "WPADDisconnect", "WPADSetCallbackByKPAD", "WPADSetSpeakerVolume", "KPADInit", "KPADInitEx", "KPADReset",
                           "KPADSetPosParam", "KPADSetAccParam", "KPADEnableDPD", "KPADDisableDPD"})
         ppc_hook(n, nop);
     ppc_hook("WPADGetStatus", [](PPCContext& c) { c.r[3] = WPAD_STATE_SETUP; });
@@ -236,4 +316,8 @@ void wpad_install() {
     ppc_hook("KPADRead", hle_KPADRead);
     ppc_hook("KPADReadEx", hle_KPADReadEx);
     ppc_hook("KPADGetSensorHeight", hle_KPADGetSensorHeight);
+    ppc_hook("WPADRead", hle_WPADRead);
+    ppc_hook("WPADSetAutoSamplingBuf", hle_WPADSetAutoSamplingBuf);
+    ppc_hook("WPADGetLatestIndexInBuf", hle_WPADGetLatestIndexInBuf);
+    ppc_hook("kpad_wpad_status", hle_kpad_wpad_status);
 }
