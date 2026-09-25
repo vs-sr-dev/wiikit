@@ -37,7 +37,8 @@ float prev_x = 0, prev_y = 0;
 float prev_acc[3] = {0, -1, 0};
 bool swing = false;
 
-// KPADRead(chan, KPADStatus* samples, len): one sample, newest first
+// KPADRead(chan, KPADStatus* samples, len): one sample, newest first.
+// KPADReadEx(chan, samples, len, s32* err) is the same with an error out.
 void hle_KPADRead(PPCContext& c) {
     uint32_t chan = c.r[3], s = c.r[4], len = c.r[5];
     if (chan != 0 || !s || !len) { ret(c, 0); return; }
@@ -77,6 +78,12 @@ void hle_KPADRead(PPCContext& c) {
     ret(c, 1);
 }
 
+void hle_KPADReadEx(PPCContext& c) {
+    uint32_t err = c.r[6];
+    hle_KPADRead(c);
+    if (err) st32(err, c.r[3] ? 0 : (uint32_t)WPAD_ERR_NO_CONTROLLER);   // KPAD_READ_ERR_NONE / NO_CONTROLLER
+}
+
 void hle_KPADGetSensorHeight(PPCContext& c) { c.f[1] = c.ps1[1] = 0.0; }
 
 }  // namespace
@@ -90,7 +97,7 @@ void wpad_install() {
     // set-up and state
     for (const char* n : {"WPADInit", "WPADRegisterAllocator", "WPADDisconnect", "WPADSetAutoSamplingBuf",
                           "WPADSetCallbackByKPAD", "WPADSetSpeakerVolume", "WPADEnableMotor",
-                          "WPADControlMotor", "KPADInit", "KPADReset", "KPADSetPosParam",
+                          "WPADControlMotor", "KPADInit", "KPADInitEx", "KPADReset", "KPADSetPosParam",
                           "KPADSetAccParam", "KPADEnableDPD", "KPADDisableDPD"})
         ppc_hook(n, nop);
     ppc_hook("WPADGetStatus", [](PPCContext& c) { c.r[3] = WPAD_STATE_SETUP; });
@@ -108,5 +115,6 @@ void wpad_install() {
         ppc_hook(n, no_controller);
     ppc_hook("WPADProbe", hle_WPADProbe);
     ppc_hook("KPADRead", hle_KPADRead);
+    ppc_hook("KPADReadEx", hle_KPADReadEx);
     ppc_hook("KPADGetSensorHeight", hle_KPADGetSensorHeight);
 }

@@ -50,8 +50,10 @@ WPADGetRadioSensitivity
 WPADGetInfoAsync
 WPADSaveConfig
 KPADInit
+KPADInitEx             # KPADInit's body; games of 2010 call it directly
 KPADReset
 KPADRead
+KPADReadEx             # KPADRead with an error out, the form some games call
 KPADSetPosParam
 KPADSetAccParam
 KPADSetConnectCallback
