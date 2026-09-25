@@ -58,9 +58,9 @@ struct VideoOptions {
     bool fullscreen = false;                 // start fullscreen (borderless, at the desktop's mode)
     int window_w = 0, window_h = 0;          // the window's size; 0 = 720 lines at the screen's shape
     std::string keys;                        // the key file: the Remote's buttons on keys and mouse buttons
-    int input = -1;                          // channel 1's sources (INPUT_*); -1: as the key file says (auto)
+    int input = -1;                          // channel 1's sources, INPUT_MODE_* (windows.h has INPUT_*); -1: the key file's
 };
-enum { INPUT_AUTO, INPUT_PAD, INPUT_KEYBOARD };
+enum { INPUT_MODE_AUTO, INPUT_MODE_PAD, INPUT_MODE_KEYBOARD };
 void video_configure(const VideoOptions& o);
 // The host's input as a Wii Remote (read by wpad.cpp): WPAD core button
 // bits; the pointer over the picture VI shows, -1..1 with y down, when the

@@ -686,7 +686,7 @@ enum : uint32_t { CL_UP = 0x0001, CL_LEFT = 0x0002, CL_ZR = 0x0004, CL_X = 0x000
                   CL_HOME = 0x0800, CL_MINUS = 0x1000, CL_L = 0x2000, CL_DOWN = 0x4000, CL_RIGHT = 0x8000 };
 constexpr uint32_t kStick = 1u << 16;               // L up, down, left, right, then R's: kStick << 0..7
 std::vector<Binding> bindings;
-int keys_input = INPUT_AUTO;                        // the key file's Input
+int keys_input = INPUT_MODE_AUTO;                        // the key file's Input
 bool face_by_label = false;                         // the key file's Face Buttons = Label
 float dead_zone = 0.15f;                            // the key file's Dead Zone: of the sticks' travel, radial
 
@@ -877,7 +877,7 @@ int input_mode() { return opt.input >= 0 ? opt.input : keys_input; }
 void pad_added(SDL_JoystickID id) {
     for (SDL_Gamepad* g : chan_pad)
         if (g && SDL_GetGamepadID(g) == id) return;
-    int first = input_mode() == INPUT_KEYBOARD ? 1 : 0, chan = -1;
+    int first = input_mode() == INPUT_MODE_KEYBOARD ? 1 : 0, chan = -1;
     for (int i = first; i < 4 && chan < 0; ++i)
         if (!chan_pad[i]) chan = i;
     if (chan < 0) { rt_log("video: a fifth pad (%s): no channel for it", SDL_GetGamepadNameForID(id)); return; }
@@ -886,7 +886,7 @@ void pad_added(SDL_JoystickID id) {
     chan_pad[chan] = g;
     rt_log("video: pad \"%s\" (%s) on channel %d%s", SDL_GetGamepadName(g),
            SDL_GetGamepadStringForType(SDL_GetGamepadType(g)), chan + 1,
-           chan == 0 && input_mode() == INPUT_AUTO ? ", with the keyboard and the mouse" : "");
+           chan == 0 && input_mode() == INPUT_MODE_AUTO ? ", with the keyboard and the mouse" : "");
 }
 
 void pad_removed(SDL_JoystickID id) {
@@ -1073,7 +1073,7 @@ void update_pad() {
     // merged with its pad unless Input says one of them; the others their pads
     ClassicState c[4];
     int mode = input_mode();
-    if (mode != INPUT_PAD) {
+    if (mode != INPUT_MODE_PAD) {
         static const uint32_t from_remote[][2] = {{0x0800, CL_A}, {0x0400, CL_B}, {0x0200, CL_X}, {0x0100, CL_Y},
                                                   {0x0010, CL_PLUS}, {0x1000, CL_MINUS}, {0x8000, CL_HOME},
                                                   {0x0008, CL_UP}, {0x0004, CL_DOWN}, {0x0001, CL_LEFT}, {0x0002, CL_RIGHT}};
@@ -1093,7 +1093,7 @@ void update_pad() {
         k.rt = k.buttons & CL_R ? 1.0f : 0.0f;
     }
     for (int i = 0; i < 4; ++i)
-        if (chan_pad[i] && !(i == 0 && mode == INPUT_KEYBOARD)) merge(c[i], classic_from_pad(chan_pad[i]));
+        if (chan_pad[i] && !(i == 0 && mode == INPUT_MODE_KEYBOARD)) merge(c[i], classic_from_pad(chan_pad[i]));
     update_rumble();
     std::lock_guard<std::mutex> lk(pad_mx);
     pad = p;

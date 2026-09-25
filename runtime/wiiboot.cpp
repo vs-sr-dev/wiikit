@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) vo.keys = argv[++i];
         else if (!std::strcmp(argv[i], "--input") && i + 1 < argc) {
             std::string m = argv[++i];
-            vo.input = m == "auto" ? INPUT_AUTO : m == "pad" ? INPUT_PAD : m == "keyboard" ? INPUT_KEYBOARD : -2;
+            vo.input = m == "auto" ? INPUT_MODE_AUTO : m == "pad" ? INPUT_MODE_PAD : m == "keyboard" ? INPUT_MODE_KEYBOARD : -2;
             if (vo.input == -2) {
                 std::fprintf(stderr, "wiiboot: --input is auto, pad or keyboard\n");
                 return 2;
