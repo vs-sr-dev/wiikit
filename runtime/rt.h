@@ -42,7 +42,7 @@ void os_start_main(uint32_t entry);               // run __start on a guest host
 void os_raise();                                  // a device changed its interrupt line
 uint64_t os_tb_now();                             // guest time base now
 void os_watch(int seconds);                       // report the running thread periodically
-void os_profile();                                // WIIKIT_PROFILE: sample the guest code, list the hot functions
+void os_profile();                                // WIIKIT_PROFILE: sample the guest code (=render: the renderer), list the hot functions
 
 // ---- GX (gx.cpp) -----------------------------------------------------------------
 void gx_init();                                   // after video_configure

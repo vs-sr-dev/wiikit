@@ -46,10 +46,10 @@ uint64_t file_size(const std::string& path) {
     return n;
 }
 
-void add(uint64_t off, const std::string& path) {
-    uint64_t n = file_size(path);
+void add(uint64_t off, const std::string& path, uint64_t n) {
     if (n) g_regions.push_back({off, n, path});
 }
+void add(uint64_t off, const std::string& path) { add(off, path, file_size(path)); }
 
 // walk the FST: directories hold [first child, one past the last entry]
 void walk(const std::string& root) {
@@ -62,7 +62,7 @@ void walk(const std::string& root) {
         while (i >= stack.back().first) stack.pop_back();
         std::string name = names + (be32(e) & 0xFFFFFF);
         if (e[0]) stack.push_back({be32(e + 8), stack.back().second + name + "/"});
-        else add((uint64_t)be32(e + 4) << 2, root + "/files/" + stack.back().second + name);
+        else add((uint64_t)be32(e + 4) << 2, root + "/files/" + stack.back().second + name, be32(e + 8));   // opened when read
     }
 }
 

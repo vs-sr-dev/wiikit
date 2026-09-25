@@ -546,7 +546,7 @@ bool exe_caller(CONTEXT c, const uint8_t* copy, uintptr_t copy_base, size_t copy
 }
 }  // namespace
 
-void profile_main() {
+void profile_main(HANDLE fixed) {         // the thread to sample; none: the guest thread running
     uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr);
     auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     uintptr_t lo = base, hi = base + nt->OptionalHeader.SizeOfImage;
@@ -560,8 +560,8 @@ void profile_main() {
     auto norm = [&](uintptr_t ip) { return (ip - base + 0x140000000ull) & ~(uintptr_t)15; };
     for (;;) {
         Sleep(1);
-        HANDLE t = nullptr;
-        {
+        HANDLE t = fixed;
+        if (!t) {
             std::lock_guard<std::mutex> lk(g_mx);
             if (g_running) t = g_running->handle;
         }
@@ -622,7 +622,11 @@ void profile_main() {
 
 void os_profile() {
 #ifdef _WIN32
-    std::thread(profile_main).detach();
+    // WIIKIT_PROFILE=render: the calling thread, which goes on to render
+    HANDLE fixed = nullptr;
+    if (!std::strcmp(std::getenv("WIIKIT_PROFILE"), "render"))
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &fixed, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    std::thread(profile_main, fixed).detach();
 #endif
 }
 
