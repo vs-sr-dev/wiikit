@@ -636,6 +636,21 @@ bool hw_load_fonts(const char* dir) {
     return ok;
 }
 
+// The IPL leaves VI running in the console's format; VIInit reads the current
+// format from DCR and VIConfigure refuses to switch NTSC <-> PAL. A running
+// VI also means VIInit skips its own set-up, display interrupts included, so
+// they are preset too, as Dolphin's VideoInterface::Preset does. An NTSC boot
+// keeps VI at zero (VIInit then sets everything itself), as before.
+void hw_vi_preset(bool pal) {
+    if (!pal) return;
+    vi[0x00] = 6;                                    // VTR: EQU 6, ACV 0
+    vi[0x01] = 1 << 8 | 1;                           // DCR: FMT = PAL, ENB
+    vi[0x18] = 0x1000 | 263;                         // DI0: enabled, line 263
+    vi[0x19] = 430;                                  //      pixel 430
+    vi[0x1A] = 0x1000 | 1;                           // DI1: enabled, line 1
+    vi[0x1B] = 1;
+}
+
 void hw_init() {
     sram_init();
     vi_frame_tb = os_tb_now();

@@ -50,6 +50,7 @@ void gx_report();                                 // command stream statistics
 
 // ---- the hardware (hw.cpp) -----------------------------------------------------------
 void hw_init();
+void hw_vi_preset(bool pal);                        // VI as the IPL leaves it
 bool hw_load_fonts(const char* dir);               // font_japanese.bin, font_western.bin
 bool hw_external_pending();                        // PI cause & mask
 void hw_vi_retrace();                              // called at each vertical retrace

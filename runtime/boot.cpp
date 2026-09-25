@@ -8,6 +8,7 @@
 #include "disc.h"
 #include "mem.h"
 #include "rt.h"
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -52,7 +53,16 @@ uint32_t boot_disc(const char* extract_dir) {
     st32(0x80000034, fst_addr);                    // arena high
     st32(0x80000038, fst_addr);                    // FST
     st32(0x8000003C, be32(&boot[0x42C]) << 2);     // FST maximum size
-    st32(0x800000CC, 0);                           // video: NTSC
+    // video: the disc's region, as Dolphin boots it. A PAL game asks VI for
+    // PAL, and the SDK refuses a switch from NTSC; SYSCONF's IPL.E60 then
+    // lets it choose 60 Hz. The region is the disc's u32 at 0x4E000
+    // (disc/region.bin: 0 Japan, 1 USA, 2 Europe, 4 Korea), else the game
+    // id's fourth letter (E, J, K, W: NTSC; the others PAL)
+    std::vector<uint8_t> reg = slurp(root + "/disc/region.bin");
+    const bool pal = reg.size() >= 4 ? be32(reg.data()) == 2 :
+                     !std::strchr("EJKW", boot[3]);
+    st32(0x800000CC, pal ? 1 : 0);                 // 1 PAL, 0 NTSC
+    hw_vi_preset(pal);
     st32(0x800000F0, 0x01800000);                  // simulated memory size
     st32(0x800000F4, bi2_addr);
     st32(0x800000F8, 243000000);                   // bus clock

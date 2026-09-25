@@ -23,7 +23,11 @@ none; this finds them from the code, for CodeWarrior's output:
    branch from before it to beyond it, or from it or after back before it,
    means dead code inside one function instead (a `b` to a known start is
    a tail call and does not count). Data words pointing at code are not
-   evidence alone: 30% of those after a terminator are switch cases.
+   evidence alone: 30% of those after a terminator are switch cases. But a
+   data word pointing at unreached code after a terminator is a start even
+   where a branch crosses it (a tail call jumping over a constructor listed
+   in .ctors), unless the unit has a switch table left unresolved: resolved
+   cases are reached, so what a table does not reach is not a case.
 4. Repeat 2-3 to a fixed point.
 
 Switch tables are found as the recompiler finds them (lwzx off a lis/addi
@@ -133,6 +137,14 @@ def scan_table(img, base, lo, hi, bound=None):
     return out or None
 
 
+def _loads_ctr_from_table(code, bctr, lo, lookback=8):
+    """An lwzx feeding this bctr's CTR: a table jump, resolved or not."""
+    for a in range(max(lo, bctr - 4 * lookback), bctr, 4):
+        if code.ins[a].op == "lwzx":
+            return True
+    return False
+
+
 def _data_pointers(img, code):
     out = set()
     for s in img.segments:
@@ -183,7 +195,7 @@ def discover(img, seeds=(), log=print):
     while True:
         rounds += 1
         units, inner = _units(code, strong)
-        new, reached_all = _unreached(code, units, inner, cache)
+        new, reached_all = _unreached(code, units, inner, cache, pointers)
         if not new - strong:
             break
         strong |= new
@@ -221,7 +233,7 @@ def _units(code, strong):
     return units, inner
 
 
-def _unreached(code, units, inner, cache):
+def _unreached(code, units, inner, cache, pointers=frozenset()):
     """New seeds: in each unit, the first code word of a run that nothing in
     the unit reaches, provided no branch crosses it (a clean cut). Unreached
     code that branches cross is dead code of the function around it."""
@@ -231,16 +243,17 @@ def _unreached(code, units, inner, cache):
         ent = tuple(inner_sorted[bisect.bisect_left(inner_sorted, s):bisect.bisect_left(inner_sorted, e)])
         key = (s, e, ent)
         if key not in cache:
-            cache[key] = _unit_scan(code, s, e, ent)
+            cache[key] = _unit_scan(code, s, e, ent, pointers)
         cuts, seen = cache[key]
         new |= cuts
         reached_all |= seen
     return new, reached_all
 
 
-def _unit_scan(code, s, e, ent):
+def _unit_scan(code, s, e, ent, pointers=frozenset()):
     edges = []                                   # (from, to) inside the unit
     known = {s, *ent}
+    unresolved = False
     for a in range(s, e, 4):
         i = code.ins[a]
         if i.op in ("b", "bc") and not i.f["LK"]:
@@ -248,8 +261,11 @@ def _unit_scan(code, s, e, ent):
             if s <= t < e and not (i.op == "b" and t in known):   # b to a start: a tail call
                 edges.append((a, t))
         elif i.op == "bcctr" and not i.f["LK"] and i.f["BO"] & 0x14 == 0x14:
-            for t in table_targets(code, a, s, e) or ():
+            tt = table_targets(code, a, s, e)
+            for t in tt or ():
                 edges.append((a, t))
+            if tt is None and _loads_ctr_from_table(code, a, s):
+                unresolved = True
     succ = {}
     for a, t in edges:
         succ.setdefault(a, []).append(t)
@@ -271,7 +287,7 @@ def _unit_scan(code, s, e, ent):
                 p -= 4
             after_end = p < s or _terminates(code.ins[p]) or code.words[a - 4] == 0
             crossed = any((f < a < t) or (f >= a > t) for f, t in edges)
-            if after_end and not crossed:
+            if after_end and (not crossed or (a in pointers and not unresolved)):
                 cuts.add(a)
             while a < e and a not in seen:
                 a += 4

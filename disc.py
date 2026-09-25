@@ -255,6 +255,7 @@ def extract(path, out, want="DATA", pure=False, log=print):
     os.makedirs(os.path.join(out, "disc"), exist_ok=True)
     disc.seek(0)
     parts = {"disc/header.bin": disc.read(0x100),
+             "disc/region.bin": (disc.seek(0x4E000), disc.read(0x20))[1],
              "ticket.bin": p.ticket, "tmd.bin": p.tmd,
              "sys/boot.bin": b["raw"],
              "sys/bi2.bin": p.read(0x440, 0x2000),

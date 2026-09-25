@@ -92,7 +92,11 @@ size_t disc_read(uint64_t off, void* dst, size_t n) {
         uint64_t a = std::max(off, it->off), b = std::min(off + n, it->off + it->size);
         if (a >= b) continue;
         FILE*& f = g_files[it->path];
-        if (!f) f = std::fopen(it->path.c_str(), "rb");
+        if (!f) {
+            static bool log = std::getenv("WIIKIT_DISCLOG") != nullptr;   // each file, when first read
+            if (log) rt_log("disc: %s", it->path.c_str());
+            f = std::fopen(it->path.c_str(), "rb");
+        }
         if (!f) continue;
         _fseeki64(f, (int64_t)(a - it->off), SEEK_SET);
         size_t got = std::fread(out + (a - off), 1, (size_t)(b - a), f);
