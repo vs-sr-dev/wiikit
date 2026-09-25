@@ -48,6 +48,7 @@ void hle_KPADRead(PPCContext& c) {
     st32(s + 0x08, prev_hold & ~p.buttons);           // release
     prev_hold = p.buttons;
     float acc[3] = {0, -1, 0};                        // gravity, the Remote level
+    if (p.tilt) { acc[1] = 0; acc[2] = (float)p.tilt; p.pointer = false; }   // raised: along its length
     if (p.shake) acc[0] = (swing = !swing) ? 2.0f : -2.0f;
     float d2 = 0, a2 = 0;
     for (int i = 0; i < 3; ++i) {

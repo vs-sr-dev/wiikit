@@ -8,6 +8,7 @@
 #include "disc.h"
 #include "rt.h"
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <vector>
 #ifndef _WIN32
@@ -92,9 +93,12 @@ size_t disc_read(uint64_t off, void* dst, size_t n) {
         uint64_t a = std::max(off, it->off), b = std::min(off + n, it->off + it->size);
         if (a >= b) continue;
         FILE*& f = g_files[it->path];
+        // WIIKIT_DISCLOG=1: each file when first read; =all: every read
+        static const char* log = std::getenv("WIIKIT_DISCLOG");
+        if (log && !std::strcmp(log, "all"))
+            rt_log("disc: %s +%llX %llX", it->path.c_str(), (unsigned long long)(a - it->off), (unsigned long long)(b - a));
         if (!f) {
-            static bool log = std::getenv("WIIKIT_DISCLOG") != nullptr;   // each file, when first read
-            if (log) rt_log("disc: %s", it->path.c_str());
+            if (log && std::strcmp(log, "all")) rt_log("disc: %s", it->path.c_str());
             f = std::fopen(it->path.c_str(), "rb");
         }
         if (!f) continue;

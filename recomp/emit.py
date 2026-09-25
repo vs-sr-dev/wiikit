@@ -106,6 +106,13 @@ def _bc_cond(bo, bi):
     return pre, " && ".join(parts)
 
 
+# SPRs of the processor, not of a thread: the OS saves GPRs, FPRs, CR, LR,
+# CTR, XER, GQRs and SRR0/1 per thread, and nothing else. HID2's locked-
+# cache enable set by one thread (LCEnable) is seen by all (THP's decoder
+# checks it on its own thread); likewise HID0/1/4, WPAR and the DMA pair.
+_GLOBAL_SPRS = {920, 921, 922, 923, 1008, 1009, 1011, 1017}
+
+
 def emit(ins, addr, fn):
     """C++ lines for one instruction. `fn` provides goto/call/table resolution."""
     op, f = ins.op, ins.f
@@ -292,6 +299,8 @@ def emit(ins, addr, fn):
     # ---- system registers ---------------------------------------------------------------
     if op == "mfspr":
         n, D = f["spr"], f["D"]
+        if n in _GLOBAL_SPRS:
+            return [f"c.r[{D}] = g_ppc_spr[{n}];"]
         src = {1: "mfxer(c)", 8: "c.lr", 9: "c.ctr", 22: "ppc_mfdec()",
                268: "(uint32_t)ppc_timebase()", 269: "(uint32_t)(ppc_timebase() >> 32)"}.get(n)
         if src is None:
@@ -306,7 +315,9 @@ def emit(ins, addr, fn):
         if n in (284, 285):               # TBL, TBU
             return [f"ppc_mttb({n - 284}, c.r[{S}]);"]
         if n == 923:                      # DMA_L: starts the locked cache's DMA
-            return [f"c.spr[923] = ppc_lc_dma(c.spr[922], c.r[{S}]);"]
+            return [f"g_ppc_spr[923] = ppc_lc_dma(g_ppc_spr[922], c.r[{S}]);"]
+        if n in _GLOBAL_SPRS:
+            return [f"g_ppc_spr[{n}] = c.r[{S}];"]
         dst = {8: "c.lr", 9: "c.ctr"}.get(n) or (f"c.gqr[{n - 912}]" if 912 <= n < 920 else f"c.spr[{n}]")
         return [f"{dst} = c.r[{S}];"]
     if op == "mftb":

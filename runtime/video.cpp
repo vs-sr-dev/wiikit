@@ -668,14 +668,18 @@ Rect picture_rect(float w, float h) {
 // the extracted disc by default), written with the defaults when there is
 // none. Home has no key: Esc opens the port's own menu (video_run) instead
 // of the Wii's; F11 and Alt+Enter switch fullscreen.
-struct Binding { SDL_Scancode key; uint32_t mouse; uint32_t bits; bool shake; };   // key or mouse button mask
+// a key or a mouse button (mask); drag: only while the mouse moves fast with the button held
+struct Binding { SDL_Scancode key; uint32_t mouse; uint32_t bits; bool shake; bool drag; };
+// not Remote buttons: the Remote raised, pointing up (PadState::tilt)
+constexpr uint32_t kRaisePlus = 1u << 24, kRaiseMinus = 1u << 25;
 std::vector<Binding> bindings;
 
 const char* DEFAULT_KEYS =
     "# wiiboot's keys: each Wii Remote button, then the keys and mouse buttons that press it.\n"
     "# Keys by SDL's names (https://wiki.libsdl.org/SDL3/SDL_Scancode): A..Z, 0..9, Return,\n"
     "# Space, Tab, Backspace, Left Shift, Up, Down, Left, Right, Keypad Enter, F1..F10...\n"
-    "# Mouse buttons: Mouse Left, Mouse Right, Mouse Middle, Mouse X1, Mouse X2.\n"
+    "# Mouse buttons: Mouse Left, Mouse Right, Mouse Middle, Mouse X1, Mouse X2; Drag Left, Drag Right,\n"
+    "# Drag Middle: the button held and the mouse moving fast (a swing: Shake = Drag Left).\n"
     "# Fixed: Esc (the pause box), F11 and Alt+Enter (fullscreen). Delete the file for the defaults.\n"
     "A     = Return, Keypad Enter, Mouse Left\n"
     "B     = Backspace, Mouse Right\n"
@@ -711,7 +715,8 @@ void load_keys(const std::string& path) {
     struct Btn { const char* name; uint32_t bits; };
     static const Btn buttons[] = {{"A", 0x0800}, {"B", 0x0400}, {"Up", 0x0008}, {"Down", 0x0004},
                                   {"Left", 0x0001}, {"Right", 0x0002}, {"Plus", 0x0010}, {"Minus", 0x1000},
-                                  {"1", 0x0200}, {"2", 0x0100}, {"Shake", 0}};
+                                  {"1", 0x0200}, {"2", 0x0100}, {"Shake", 0},
+                                  {"Raise", kRaisePlus}, {"Raise Alt", kRaiseMinus}};
     static const Btn mice[] = {{"Mouse Left", SDL_BUTTON_LMASK}, {"Mouse Right", SDL_BUTTON_RMASK},
                                {"Mouse Middle", SDL_BUTTON_MMASK}, {"Mouse X1", SDL_BUTTON_X1MASK},
                                {"Mouse X2", SDL_BUTTON_X2MASK}};
@@ -728,7 +733,7 @@ void load_keys(const std::string& path) {
         if (eq != std::string::npos)
             for (const Btn& c : buttons)
                 if (SDL_strcasecmp(trim(l.substr(0, eq)).c_str(), c.name) == 0) b = &c;
-        if (!b) { rt_log("video: %s:%d: not a Remote button (A B Up Down Left Right Plus Minus 1 2 Shake)", path.c_str(), line); continue; }
+        if (!b) { rt_log("video: %s:%d: not a Remote button (A B Up Down Left Right Plus Minus 1 2 Shake Raise)", path.c_str(), line); continue; }
         std::string rest = l.substr(eq + 1);
         for (size_t p = 0; p <= rest.size();) {
             size_t q = rest.find(',', p);
@@ -736,9 +741,13 @@ void load_keys(const std::string& path) {
             std::string name = trim(rest.substr(p, q - p));
             p = q + 1;
             if (name.empty()) continue;
-            Binding k{SDL_SCANCODE_UNKNOWN, 0, b->bits, b->bits == 0};
+            Binding k{SDL_SCANCODE_UNKNOWN, 0, b->bits, b->bits == 0, false};
             for (const Btn& m : mice)
                 if (SDL_strcasecmp(name.c_str(), m.name) == 0) k.mouse = m.bits;
+            static const Btn drags[] = {{"Drag Left", SDL_BUTTON_LMASK}, {"Drag Right", SDL_BUTTON_RMASK},
+                                        {"Drag Middle", SDL_BUTTON_MMASK}};
+            for (const Btn& m : drags)
+                if (SDL_strcasecmp(name.c_str(), m.name) == 0) { k.mouse = m.bits; k.drag = true; }
             if (!k.mouse) k.key = SDL_GetScancodeFromName(name.c_str());
             if (!k.mouse && k.key == SDL_SCANCODE_UNKNOWN) { rt_log("video: %s:%d: no key named \"%s\"", path.c_str(), line, name.c_str()); continue; }
             bindings.push_back(k);
@@ -752,13 +761,38 @@ void update_pad() {
     bool alt = SDL_GetModState() & SDL_KMOD_ALT;           // Alt+Enter is fullscreen, nothing else
     float mx = 0, my = 0;
     SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+    // the mouse's speed, in window heights a second over the last 40 ms or so;
+    // a drag counts from kDragSpeed, and lasts kDragHold after it slows
+    // down, so that a quick flick still gives the game a few samples
+    constexpr float kDragSpeed = 1.5f;
+    constexpr double kDragHold = 0.12;
+    static float lx = mx, ly = my, speed = 0;
+    static Clock::time_point lt = Clock::now(), drag_until{};
+    {
+        auto now = Clock::now();
+        double dt = std::chrono::duration<double>(now - lt).count();
+        int ww0 = 0, wh0 = 0;
+        SDL_GetWindowSize(win, &ww0, &wh0);
+        if (dt > 0.002 && wh0 > 0) {
+            float v = std::hypot(mx - lx, my - ly) / (float)wh0 / (float)dt;
+            float a = (float)std::min(1.0, dt / 0.04);
+            speed += (v - speed) * a;
+            lx = mx; ly = my; lt = now;
+            if (speed > kDragSpeed)
+                drag_until = now + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(kDragHold));
+        }
+    }
+    bool dragging = Clock::now() < drag_until;
     for (const Binding& k : bindings) {
-        bool down = k.mouse ? (mb & k.mouse) != 0
+        bool down = k.mouse ? (mb & k.mouse) != 0 && (!k.drag || dragging)
                             : ks[k.key] && !(alt && (k.key == SDL_SCANCODE_RETURN || k.key == SDL_SCANCODE_KP_ENTER));
         if (!down) continue;
         p.buttons |= k.bits;
         if (k.shake) p.shake = true;
+        if (k.bits & kRaisePlus) p.tilt = 1;
+        if (k.bits & kRaiseMinus) p.tilt = -1;
     }
+    p.buttons &= ~(kRaisePlus | kRaiseMinus);
     int ww = 0, wh = 0;
     SDL_GetWindowSize(win, &ww, &wh);                        // mouse coordinates are in window units
     if (ww > 0 && wh > 0 && (SDL_GetWindowFlags(win) & SDL_WINDOW_MOUSE_FOCUS)) {

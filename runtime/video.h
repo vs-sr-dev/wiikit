@@ -63,7 +63,9 @@ void video_configure(const VideoOptions& o);
 // The host's input as a Wii Remote (read by wpad.cpp): WPAD core button
 // bits; the pointer over the picture VI shows, -1..1 with y down, when the
 // mouse is inside it; shake while the Remote is to be shaken.
-struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false, shake = false; };
+// tilt: 0 level, pointing at the screen; +1 or -1 raised, pointing up (the
+// sign of KPAD's acc.z then, while a game's expectation is found out)
+struct PadState { uint32_t buttons = 0; float x = 0, y = 0; bool pointer = false, shake = false; int tilt = 0; };
 PadState video_pad();
 
 // WIIKIT_PERF=1: where a frame's time goes, reported every second by the

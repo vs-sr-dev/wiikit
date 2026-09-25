@@ -90,6 +90,8 @@ void ppc_io_write(uint32_t a, uint32_t v, int size) {
 // DMA_L's load bit. It completes at once: the trigger reads back clear and
 // HID2's queue length stays 0, so LCQueueWait never waits. A store to the
 // gather pipe's address feeds the GX FIFO, as NW4R's display-list path does.
+uint32_t g_ppc_spr[1024];
+
 uint32_t ppc_lc_dma(uint32_t dma_u, uint32_t dma_l) {
     if (!(dma_l & 2)) return dma_l;
     uint32_t lines = (dma_u & 0x1F) << 2 | (dma_l >> 2 & 3);

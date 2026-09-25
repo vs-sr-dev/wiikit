@@ -395,9 +395,24 @@ void output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume, bool dpl2
     }
 }
 
+// The Remotes' speakers: their 6 kHz samples go where the CPU sends them
+// to each Remote, and, as there is no Remote to play them, the first
+// Remote's are also mixed into the TV's main L/R (as Dolphin plays them),
+// resampled linearly to 32 kHz: this list writes WM before OUTPUT.
+int16_t wm_last = 0;
 void output_remotes(const uint32_t* addr) {
     for (int r = 0; r < 4; ++r)
         for (int i = 0; i < NWM; ++i) st16(dsp_virt(addr[r]) + 2 * i, (uint16_t)clamp16(wm[2 * r][i]));
+    for (int i = 0; i < N; ++i) {
+        float t = (float)i * NWM / N;                    // position in this frame's 18 samples, from the last one
+        int k = (int)t;
+        float f = t - (float)k;
+        int32_t a = k == 0 ? wm_last : clamp16(wm[0][k - 1]), b = clamp16(wm[0][k]);
+        int32_t v = (int32_t)((float)a + (float)(b - a) * f);
+        mix[ML][i] += v;
+        mix[MR][i] += v;
+    }
+    wm_last = clamp16(wm[0][NWM - 1]);
 }
 
 }  // namespace
