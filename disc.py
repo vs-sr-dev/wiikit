@@ -1,4 +1,4 @@
-"""Wii disc images: .iso, .wbfs, .rvz and .wia; partitions, decryption, file system.
+"""Wii and GameCube disc images: .iso, .wbfs, .rvz and .wia; partitions, decryption, file system.
 
     python -m wiikit.disc GAME.wbfs --info
     python -m wiikit.disc GAME.wbfs --list [--part DATA]
@@ -40,6 +40,12 @@ FST   Partition offset 0x424 (>> 2), size 0x428 (>> 2). 12-byte entries:
       u8 is-dir, u24 name offset, then file (offset >> 2, size) or directory
       (parent index, index past the last child). Entry 0 is the root and its
       size is the entry count; the name table follows the entries.
+
+GameCube
+      0x01C GameCube magic 0xC2339F3D, no partitions, no encryption: the disc
+      itself is laid out as a Wii partition's payload (boot.bin at 0, bi2 at
+      0x440, the apploader at 0x2440), except that the DOL and FST offsets
+      at 0x420-0x428 and the FST's file offsets are plain bytes, not >> 2.
 """
 import argparse
 import os
@@ -48,6 +54,7 @@ import struct
 from . import aes, rvz
 
 WII_MAGIC = 0x5D1C9EA3
+GC_MAGIC = 0xC2339F3D
 WII_SECTOR = 0x8000
 WII_SECTORS_DL = 143432 * 2          # dual-layer disc, in 0x8000 sectors
 CLUSTER, HASH_AREA, PAYLOAD = 0x8000, 0x400, 0x7C00
@@ -132,6 +139,7 @@ def header(disc):
         "game_id": h[:6].decode("ascii", "replace"),
         "disc_no": h[6], "version": h[7],
         "wii": be32(h, 0x18) == WII_MAGIC,
+        "gc": be32(h, 0x1C) == GC_MAGIC,
         "title": h[0x20:0x60].split(b"\0")[0].decode("latin1"),
     }
 
@@ -153,7 +161,44 @@ def partitions(disc):
     return out
 
 
-class Partition:
+class Volume:
+    """A disc's file system: boot.bin, the DOL, the FST. Offsets in the header
+    and the FST are shifted right by `shift` (2 on Wii, 0 on GameCube)."""
+    shift = 2
+
+    def boot(self):
+        b = self.read(0, 0x440)
+        s = self.shift
+        return {"dol": be32(b, 0x420) << s, "fst": be32(b, 0x424) << s,
+                "fst_size": be32(b, 0x428) << s, "raw": b}
+
+    def dol_size(self, dol_off):
+        """Size of the DOL from its own section table."""
+        h = self.read(dol_off, 0x100)
+        offs = struct.unpack_from(">18I", h, 0)
+        sizes = struct.unpack_from(">18I", h, 0x90)
+        return max(o + s for o, s in zip(offs, sizes) if s)
+
+    def files(self):
+        """Yield (path, offset, size) for every file in the FST."""
+        b = self.boot()
+        yield from walk_fst(self.read(b["fst"], b["fst_size"]), self.shift)
+
+
+class GcVolume(Volume):
+    """A GameCube disc: the whole image is the file system, unencrypted."""
+    shift = 0
+    ticket = tmd = None
+
+    def __init__(self, disc):
+        self.disc = disc
+
+    def read(self, off, size):
+        self.disc.seek(off)
+        return self.disc.read(size)
+
+
+class Partition(Volume):
     """Random access to the decrypted payload of one partition."""
 
     def __init__(self, disc, offset, pure=False):
@@ -196,27 +241,8 @@ class Partition:
             size -= len(chunk)
         return bytes(out)
 
-    # --- the partition's own header and file system -------------------------
 
-    def boot(self):
-        b = self.read(0, 0x440)
-        return {"dol": be32(b, 0x420) << 2, "fst": be32(b, 0x424) << 2,
-                "fst_size": be32(b, 0x428) << 2, "raw": b}
-
-    def dol_size(self, dol_off):
-        """Size of the DOL from its own section table."""
-        h = self.read(dol_off, 0x100)
-        offs = struct.unpack_from(">18I", h, 0)
-        sizes = struct.unpack_from(">18I", h, 0x90)
-        return max(o + s for o, s in zip(offs, sizes) if s)
-
-    def files(self):
-        """Yield (path, offset, size) for every file in the FST."""
-        b = self.boot()
-        yield from walk_fst(self.read(b["fst"], b["fst_size"]))
-
-
-def walk_fst(fst):
+def walk_fst(fst, shift=2):
     total = be32(fst, 8)
     names = total * 12
 
@@ -233,11 +259,14 @@ def walk_fst(fst):
         if fst[e]:
             stack.append((b, stack[-1][1] + nm + "/"))
         else:
-            yield stack[-1][1] + nm, a << 2, b
+            yield stack[-1][1] + nm, a << shift, b
 
 
 def open_partition(path, want="DATA", pure=False):
+    """(disc, volume): a Wii partition, or a GameCube disc's one volume."""
     disc = open_disc(path)
+    if header(disc)["gc"]:
+        return disc, GcVolume(disc)
     parts = partitions(disc)
     for off, name in parts:
         if name == want.upper():
@@ -254,13 +283,14 @@ def extract(path, out, want="DATA", pure=False, log=print):
     os.makedirs(os.path.join(out, "sys"), exist_ok=True)
     os.makedirs(os.path.join(out, "disc"), exist_ok=True)
     disc.seek(0)
-    parts = {"disc/header.bin": disc.read(0x100),
-             "disc/region.bin": (disc.seek(0x4E000), disc.read(0x20))[1],
-             "ticket.bin": p.ticket, "tmd.bin": p.tmd,
-             "sys/boot.bin": b["raw"],
+    parts = {"disc/header.bin": disc.read(0x100)}
+    if p.ticket is not None:                        # Wii only
+        parts.update({"disc/region.bin": (disc.seek(0x4E000), disc.read(0x20))[1],
+                      "ticket.bin": p.ticket, "tmd.bin": p.tmd})
+    parts.update({"sys/boot.bin": b["raw"],
              "sys/bi2.bin": p.read(0x440, 0x2000),
              "sys/fst.bin": p.read(b["fst"], b["fst_size"]),
-             "sys/main.dol": p.read(b["dol"], p.dol_size(b["dol"]))}
+             "sys/main.dol": p.read(b["dol"], p.dol_size(b["dol"]))})
     app = p.read(0x2440, 0x20)
     parts["sys/apploader.img"] = p.read(0x2440, 0x20 + be32(app, 0x14) + be32(app, 0x18))
     for rel, data in parts.items():
@@ -303,9 +333,13 @@ def main():
     h = header(disc)
     kind = "WBFS" if isinstance(disc, Wbfs) else disc.kind if isinstance(disc, rvz.Rvz) else "ISO"
     print(f"{kind}  {h['game_id']}  '{h['title']}'  disc {h['disc_no']} v{h['version']}"
-          f"  {'Wii' if h['wii'] else 'not Wii'}")
+          f"  {'Wii' if h['wii'] else 'GameCube' if h['gc'] else 'unknown'}")
     if isinstance(disc, Wbfs):
         print(f"  WBFS sector {disc.sec:#x}, {disc.stored_sectors()}/{len(disc.wlba)} stored")
+    if h["gc"]:
+        b = GcVolume(disc).boot()
+        print(f"  dol @{b['dol']:#x}  fst @{b['fst']:#x} ({b['fst_size']} B)")
+        return
     for off, name in partitions(disc):
         p = Partition(disc, off, a.pure)
         b = p.boot()
