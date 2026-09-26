@@ -23,6 +23,7 @@ the ports.
 | [pc-dragonquestswords](https://github.com/vs-sr-dev/pc-dragonquestswords) | Dragon Quest Swords: The Masked Queen and the Tower of Mirrors (2007, PAL) | a stripped executable (function discovery, names by signature), RVZ images, the PAL boot and EuRGB60, the locked cache's DMA, thousands of draws a frame, audio under load, the Remote's speaker, swings from mouse drags |
 | [pc-conduit2](https://github.com/vs-sr-dev/pc-conduit2) | Conduit 2 (2011) | the 2010 SDK's KPAD Ex forms, IOS replies after the call (a NAND race), the GP FIFO and display lists in MEM2, RG8/GB8 EFB copies, the relative mouse, the Classic Controller and SDL gamepads (split-screen), the F12 GX trace |
 | [pc-arcrisefantasia](https://github.com/vs-sr-dev/pc-arcrisefantasia) | Arc Rise Fantasia (2009) | the 2007 SDK's KPAD and WPAD (the Classic read from WPAD's own samples, and from the copy of them only that KPAD keeps), thousands of tiny skinned strips merged into single draws, the disc's files sized from the FST, the renderer's profiler |
+| [pc-megamanxcm](https://github.com/vs-sr-dev/pc-megamanxcm) | Mega Man X: Command Mission (2004, GameCube, PAL) | the GameCube: its discs, its clocks and the IPL's globals, the disc drive at its registers, 16 MB of ARAM, the controllers on SI, the GameCube's AX micro-code under MusyX (samples in ARAM, per-millisecond updates), drive and DMA times as long as the console's |
 
 Some pieces were first written for two earlier Wii studies (The Last Story
 and Final Fantasy Crystal Chronicles: The Crystal Bearers): the disc
