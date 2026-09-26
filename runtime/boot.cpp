@@ -3,7 +3,9 @@
 // and the FST at the top of MEM1, and the "low memory" globals at 0x80000000
 // the SDK reads (memory sizes and arenas, clocks, the IOS version, the IPC
 // buffer). Values follow Dolphin's HLE boot for an IOS of the 0x93600000
-// memory layout (IOS 56 here, from the TMD).
+// memory layout (IOS 56 here, from the TMD). A GameCube disc finds what the
+// GameCube's IPL leaves: the same first globals, its own clocks and the ARAM's
+// size, and nothing of IOS.
 #include "boot.h"
 #include "disc.h"
 #include "mem.h"
@@ -29,9 +31,15 @@ uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2
 
 }  // namespace
 
+bool g_gamecube = false;
+uint32_t g_bus_mhz = 243;
+
 uint32_t boot_disc(const char* extract_dir, bool eurgb60) {
     std::string root = extract_dir;
     if (!disc_open(extract_dir)) rt_die("%s: no sys/boot.bin and sys/fst.bin", extract_dir);
+    g_gamecube = disc_is_gamecube();
+    if (g_gamecube) g_bus_mhz = 162;
+    const int shift = g_gamecube ? 0 : 2;          // boot.bin's offsets: >> 2 on the Wii
     uint32_t entry = mem_load_dol((root + "/sys/main.dol").c_str());
     if (!entry) rt_die("%s/sys/main.dol: cannot load", extract_dir);
     const std::vector<uint8_t>& boot = disc_boot();
@@ -48,26 +56,32 @@ uint32_t boot_disc(const char* extract_dir, bool eurgb60) {
     st32(0x80000020, 0x0D15EA5E);                  // booted by the system
     st32(0x80000024, 1);
     st32(0x80000028, 0x01800000);                  // MEM1 size
-    st32(0x8000002C, 0x00000023);                  // board: retail Wii
+    st32(0x8000002C, g_gamecube ? 0x00000003 : 0x00000023);   // board: retail GameCube (HW2), retail Wii
     st32(0x80000030, 0);                           // arena low: the linker's
     st32(0x80000034, fst_addr);                    // arena high
     st32(0x80000038, fst_addr);                    // FST
-    st32(0x8000003C, be32(&boot[0x42C]) << 2);     // FST maximum size
+    st32(0x8000003C, be32(&boot[0x42C]) << shift); // FST maximum size
     // video: the disc's region, as Dolphin boots it. A PAL game asks VI for
     // PAL, and the SDK refuses a switch from NTSC. With SYSCONF's IPL.E60 set
     // the IPL leaves the TV mode at EuRGB60 (5), which is what games read
     // (VIGetTvFormat) to choose 60 Hz over 50. The region is the disc's u32 at 0x4E000
     // (disc/region.bin: 0 Japan, 1 USA, 2 Europe, 4 Korea), else the game
     // id's fourth letter (E, J, K, W: NTSC; the others PAL)
+    // (a GameCube disc: BI2's u32 at 0x18, same values)
     std::vector<uint8_t> reg = slurp(root + "/disc/region.bin");
+    if (g_gamecube && bi2.size() >= 0x1C) reg.assign(bi2.begin() + 0x18, bi2.begin() + 0x1C);
     const bool pal = reg.size() >= 4 ? be32(reg.data()) == 2 :
                      !std::strchr("EJKW", boot[3]);
-    st32(0x800000CC, pal ? (eurgb60 ? 5 : 1) : 0);   // the TV mode: 0 NTSC, 1 PAL, 5 EuRGB60
+    st32(0x800000CC, pal ? (eurgb60 && !g_gamecube ? 5 : 1) : 0);   // the TV mode: 0 NTSC, 1 PAL, 5 EuRGB60
     hw_vi_preset(pal);
     st32(0x800000F0, 0x01800000);                  // simulated memory size
     st32(0x800000F4, bi2_addr);
-    st32(0x800000F8, 243000000);                   // bus clock
-    st32(0x800000FC, 729000000);                   // CPU clock
+    st32(0x800000F8, g_bus_mhz * 1000000);         // bus clock
+    st32(0x800000FC, g_bus_mhz * 3000000);         // CPU clock: 729 MHz, 486 on the GameCube
+    if (g_gamecube) {
+        st32(0x800000D0, 0x01000000);              // ARAM size: 16 MB
+        return entry;
+    }
 
     // IOS's memory map (IOS 56 and later)
     uint32_t ios = tmd.size() >= 0x18C ? be32(&tmd[0x188]) : 56;

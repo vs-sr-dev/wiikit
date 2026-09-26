@@ -3,7 +3,9 @@
 A game-agnostic toolkit for Wii reverse engineering and native PC ports:
 disc images, executables, the Gekko CPU, a static recompiler from Gekko
 code to C++, and a runtime that replaces the Wii's hardware under the
-recompiled game.
+recompiled game. The GameCube, the Wii's older self (the same processor,
+GPU and DSP), is served by the same pieces and its own few: its discs, its
+disc drive, ARAM, the controllers on SI.
 
 The same idea as [ps2kit](https://github.com/vs-sr-dev/pc-extermination/tree/main/ps2kit),
 for the Wii. Each Wii game has its own engine and formats, but a large part
@@ -40,7 +42,7 @@ git clone --recursive <port>          # or: git submodule update --init
 Each port pins a wiikit commit and moves it forward deliberately.
 
 ```sh
-python -m wiikit.disc GAME.wbfs --info           # .iso, .wbfs, .rvz, .wia
+python -m wiikit.disc GAME.wbfs --info           # .iso, .wbfs, .rvz, .wia; Wii or GameCube
 python -m wiikit.rvz GAME.rvz                   # its tables and compression
 python -m wiikit.disc GAME.wbfs --extract build/extract
 python -m wiikit.dol build/extract/sys/main.dol --info
@@ -62,11 +64,11 @@ its own layer (`RtGameLayer`) with `-DWIIKIT_EXTRA=file.cmake`.
 
 | Layer | Question it answers | Now | Next |
 |---|---|---|---|
-| 1. Recognise | What is on this disc? | `disc --info`: game id, partitions, WBFS usage; `rvz`: RVZ/WIA tables | a `fingerprint`: magics, SDK library dates, middleware found by symbol or string (Scaleform, Wwise, Bink, NW4R, Home Button) |
-| 2. Extract | Turn standard formats into standard files | `disc` (ISO, WBFS, RVZ and WIA; AES, FST), `u8`, `tpl`, `gxtex`, `dsp` | palette formats C4/C8/C14X2 in Python (the runtime's C++ `gxtex` has them), BRSTM/BRSAR, THP, BNR |
+| 1. Recognise | What is on this disc? | `disc --info`: game id, Wii or GameCube, partitions, WBFS usage; `rvz`: RVZ/WIA tables | a `fingerprint`: magics, SDK library dates, middleware found by symbol or string (Scaleform, Wwise, Bink, NW4R, Home Button) |
+| 2. Extract | Turn standard formats into standard files | `disc` (ISO, WBFS, RVZ and WIA; AES, FST; GameCube discs), `u8`, `tpl`, `gxtex`, `dsp` | palette formats C4/C8/C14X2 in Python (the runtime's C++ `gxtex` has them), BRSTM/BRSAR, THP, BNR |
 | 3. Map code | What does the code do, where? | `dol` (DOL and ELF, one address map, symbols, `--same-as`, `--libs`), `cw` (CodeWarrior demangler), `ppc` (Gekko decoder with paired singles, disassembly, callers, lis/addi and SDA xrefs, instruction census) | `ppc --mix` without symbols; `sig`: library functions named by signature in stripped executables (Dolphin's `.dsy`, symbolised ELFs) |
 | 4. Translate | Turn Gekko code into C++ | `recomp`: units and entry points to a fixed point, switch tables, one C++ function per entry, dispatch table, CMake project; stripped executables: function discovery (`recomp/discover.py`), switch tables sized from the code, names and hooks from a `symbols.tsv` | faithful single-precision rounding |
-| 5. Runtime | Replace the hardware | `ppc.h` (the CPU model), `core`/`mem` (guest space, dispatch, hooks), `os` (guest threads on host threads, interrupts, time), `hw` (PI, VI, DSP micro-codes, AI, EXI, SI, Hollywood), `gx` (FIFO parsing, vertex and texture decoding, the record), `gxtex`, `gxshader` (TEV and XF to GLSL), `video` (SDL3 window, OpenGL 4.5 renderer), `ios` + `disc` (IOS HLE at the IPC registers), `sysconf`, `boot`, `wpad` (the Wii Remote on the mouse and keys; the Classic Controller on keys and SDL gamepads, up to four, in KPAD's status and WPAD's own samples; the connect and extension callbacks), `ax` (the AX micro-code) and `audio` (SDL3 output), a port's own layer (`RtGameLayer`), a sampling profiler, and `wiiboot` | the early (2006–07) AX micro-code, locked-cache DMA, synthetic Remote motion (swing, thrust, shake) from mouse gestures, fog and Z textures, Dolphin as the oracle |
+| 5. Runtime | Replace the hardware | `ppc.h` (the CPU model), `core`/`mem` (guest space, dispatch, hooks), `os` (guest threads on host threads, interrupts, time), `hw` (PI, VI, DSP micro-codes, AI, EXI, SI, Hollywood; for a GameCube game the disc drive at its registers, 16 MB of ARAM, the controllers on SI), `gx` (FIFO parsing, vertex and texture decoding, the record), `gxtex`, `gxshader` (TEV and XF to GLSL), `video` (SDL3 window, OpenGL 4.5 renderer), `ios` + `disc` (IOS HLE at the IPC registers), `sysconf`, `boot`, `wpad` (the Wii Remote on the mouse and keys; the Classic Controller on keys and SDL gamepads, up to four, in KPAD's status and WPAD's own samples; the connect and extension callbacks), `ax` (the AX micro-code) and `audio` (SDL3 output), a port's own layer (`RtGameLayer`), a sampling profiler, and `wiiboot` (the console from the disc: a GameCube game gets its 162 MHz bus and the IPL's globals, no IOS) | the GameCube's AX micro-code (its voices, samples in ARAM), memory cards on EXI, the early (2006–07) AX micro-code, locked-cache DMA, synthetic Remote motion (swing, thrust, shake) from mouse gestures, fog and Z textures, Dolphin as the oracle |
 
 How the recompiler, the runtime, the renderer and the audio work is
 written up, with Victorious as the case, in pc-victorious's
@@ -93,7 +95,7 @@ written up, with Victorious as the case, in pc-victorious's
 | Module | Checked by |
 |---|---|
 | `aes` | the FIPS-197 C.1 vector; equal to pycryptodome on a random cluster and on disc data (`python -m wiikit.aes`) |
-| `disc` | Victorious (WBFS): re-extraction equal to the previous extractor for all 46 files. A PAL disc (ISO): 3 751 files extracted |
+| `disc` | Victorious (WBFS): re-extraction equal to the previous extractor for all 46 files. A PAL disc (ISO): 3 751 files extracted. A GameCube disc (RVZ): 4 246 files, 1.35 GB, in 16 s, the offsets where its FST puts them |
 | `rvz` | a PAL disc as RVZ (zstd 19, 128 KiB chunks): every raw region, junk filler included, equal to DolphinTool's ISO; the whole DATA partition extracted from the RVZ equal to the ISO's, 3 759 of 3 759 files, in 57 s |
 | `dol` | `--same-as`: all ten DOL sections equal in Victorious's ELF |
 | `cw` | 20 619 of 20 619 function names demangled, including templates, conversion operators and anonymous namespaces |
@@ -107,6 +109,7 @@ written up, with Victorious as the case, in pc-victorious's
 | `runtime` (renderer) | Victorious, by eye: the Wii Strap screen, the Bink logos (indirect textures), the Scaleform title and menus, the episodes in 3D, at 30 frames a second. Draws in a row merged into one call: a stripped 2009 game's battles, 23 000 draws a frame (skinned models in strips of 4 to 10 vertices) in about 1 000 calls, 20 frames a second to 27-30; the other ports' boots unchanged |
 | `runtime` (audio) | Victorious, by ear: music, voices, effects, the Bink movies' sound, the rhythm games |
 | `runtime` (Remote) | Victorious, by hand: its first episode played with the mouse, the pointer under the mouse, the rhythm game's presses, holds and shakes |
+| `runtime` (GameCube) | a stripped 2004 GameCube game, from `__start` to its opening scenes: the SDK's own `OSInit` report ("Console Type : Retail 3", 24 MB), its disc read through the drive's registers, ARAM sized by ARInit's own check, its controller found, polled and played with scripted presses, its logos, title, menu and real-time scenes at 50 frames a second |
 | `runtime` (Classic Controller) | a stripped 2010 game that learns of controllers only from the connect callback, by hand: played with an Xbox One pad, and with the keys, the mouse and the pad at once. A stripped 2009 game that reads the Classic from WPAD's raw samples (the 2007 KPAD's copy of them, `WPADGetLatestIndexInBuf`): played with the same pad into its first battle |
 
 ## Known gaps

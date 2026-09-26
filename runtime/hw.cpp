@@ -4,19 +4,25 @@
 // gives it behaviour. Devices modelled so far, to the depth the SDK needs:
 //   PI   interrupt cause and mask; the CPU FIFO registers (gx.cpp)
 //   VI   the retrace interrupts (DI0-DI3), the beam position
-//   DSP  reset/halt, mailboxes, ARAM DMA, the micro-codes (ROM, the audio
-//        init code, AX: the mixer is ax.cpp) and the AI DMA that paces audio
-//        frames and hands each block to the host's audio (audio.cpp)
+//   DSP  reset/halt, mailboxes, ARAM DMA (the GameCube's 16 MB of ARAM; none
+//        on the Wii), the micro-codes (ROM, the audio init code, AX: the
+//        mixer is ax.cpp) and the AI DMA that paces audio frames and hands
+//        each block to the host's audio (audio.cpp)
 //   AI   the sample counter
 //   EXI  three channels; channel 0 device 1 is the IPL chip: RTC, SRAM, UART,
 //        and the boot ROM, which holds the system fonts (hw_load_fonts)
-//   SI   no controllers: every transfer times out
+//   DI   the GameCube's disc drive (the Wii's is IOS's): reads by DMA, the
+//        drive's inquiry, error and audio-stream commands
+//   SI   the GameCube's controllers (a GameCube game: a standard controller
+//        on each port the host has a pad for); on the Wii none: every
+//        transfer times out
 //   CP, PE, the write-gather pipe: gx.cpp
 //   Hollywood: IPC and its interrupt (ios.cpp), GPIOs, the I2C bus to the
 //        AV encoder (answers ACK)
 // With g_mmio_log, the first read and the first write of every register is
 // logged with the guest function that made it: the to-do list of a new game.
 // WIIKIT_DSPDBG=1 in the environment traces the DSP's mails and control.
+#include "disc.h"
 #include "rt.h"
 #include "video.h"
 #include <chrono>
@@ -66,7 +72,7 @@ void log_access(char rw, uint32_t a, int size, uint32_t v) {
 
 // ---- PI -----------------------------------------------------------------------------------
 enum : uint32_t {
-    PI_SI = 0x8, PI_EXI = 0x10, PI_AI = 0x20, PI_DSP = 0x40, PI_VI = 0x100, PI_IPC = 0x4000,
+    PI_DI = 0x4, PI_SI = 0x8, PI_EXI = 0x10, PI_AI = 0x20, PI_DSP = 0x40, PI_VI = 0x100, PI_IPC = 0x4000,
     PI_RSWST = 0x10000,                              // reset button state: 1 = not pressed
 };
 uint32_t pi_mask = 0;
@@ -100,7 +106,7 @@ ViTiming vi_timing() {
 uint16_t vi_read(uint32_t off) {
     if (off == 0x2C || off == 0x2E) {               // VCT, HCT: the beam, from the clock
         ViTiming t = vi_timing();
-        double s = (double)(os_tb_now() - vi_frame_tb) / 60750000.0 * t.sample_hz;   // samples into the field
+        double s = (double)(os_tb_now() - vi_frame_tb) / (double)tb_hz() * t.sample_hz;   // samples into the field
         uint32_t line = (uint32_t)(s / (2 * t.hlw));
         if (off == 0x2C) return (uint16_t)(1 + line % ((t.halflines + 1) / 2));
         return (uint16_t)(1 + (uint64_t)s % (2 * t.hlw));
@@ -152,6 +158,9 @@ int dsp_boot_mails = 0;
 bool dsp_cmdlist_next = false;
 uint64_t dsp_frames = 0;
 uint16_t dsp_ar[8];                                  // 0x20-0x2A: ARAM DMA
+std::vector<uint8_t> aram;                           // the GameCube's ARAM (hw_init)
+bool ar_busy = false;                                // an ARAM DMA runs until ar_done
+std::chrono::steady_clock::time_point ar_done;
 bool dsp_irq() {
     return ((dsp_cr & DSP_AIDINT) && (dsp_cr & DSP_AIDINTMSK)) ||
            ((dsp_cr & DSP_ARINT) && (dsp_cr & DSP_ARINTMSK)) ||
@@ -183,7 +192,9 @@ void dsp_receive(uint32_t m) {                       // a mail from the CPU, tak
     case Ucode::AX:
         if (dsp_cmdlist_next) {                      // the command list's address: mix a frame
             dsp_cmdlist_next = false;
-            ax_command_list(m);
+            // The GameCube's AX lists and voices have their own layout, its
+            // samples live in ARAM: not mixed yet, the frames are silent
+            if (!g_gamecube) ax_command_list(m);
             ++dsp_frames;
             dsp_send(0xDCD10002, true);
         } else if ((m >> 16) == 0xBABE) {
@@ -201,7 +212,8 @@ void dsp_cr_write(uint16_t v) {
     uint16_t old = dsp_cr;
     if (dsp_dbg) rt_log("dsp: control %04X -> %04X", old, v);
     uint16_t keep = (uint16_t)(old & (DSP_AIDINT | DSP_ARINT | DSP_DSPINT) & ~v);  // write 1 to clear
-    dsp_cr = (uint16_t)((v & ~(DSP_AIDINT | DSP_ARINT | DSP_DSPINT | DSP_RES | DSP_PIINT)) | keep);
+    keep |= old & DSP_DMA;                           // read only: an ARAM DMA runs
+    dsp_cr = (uint16_t)((v & ~(DSP_AIDINT | DSP_ARINT | DSP_DSPINT | DSP_RES | DSP_PIINT | DSP_DMA)) | keep);
     if (v & DSP_RES) {
         dsp_ucode = Ucode::ROM;
         dsp_to_cpu.clear();
@@ -213,7 +225,34 @@ void dsp_cr_write(uint16_t v) {
     if ((old & DSP_HALT) && !(dsp_cr & DSP_HALT)) dsp_start();
     // PIINT (DSPAssertTask: "yield when you can"): AX has always finished already
 }
-void dsp_ar_dma() {                                  // ARAM DMA: no ARAM on the Wii, done at once
+// ARAM DMA: 0x20/0x22 main memory address, 0x24/0x26 ARAM address, 0x28/0x2A
+// the count, its top bit the direction (1: ARAM to main memory). ARAM
+// addresses wrap at its 16 MB, as on a console with no expansion: that is
+// how ARInit's size check finds 16 MB. The bytes move at once, but the
+// transfer lasts as long as on the console (about 0.5 us per 32 bytes, as
+// Dolphin times it; DSPCR's DMA bit meanwhile) before its interrupt: games
+// wait for it, and code that sees it finish too early takes other paths (a
+// game whose sound driver reads a stack slot that the wait's own call would
+// have written). No ARAM on the Wii: done at once.
+void dsp_ar_dma() {
+    if (!aram.empty()) {
+        uint32_t mm = ((uint32_t)dsp_ar[0] << 16 | dsp_ar[1]) & 0x01FFFFE0u;
+        uint32_t ar = (uint32_t)dsp_ar[2] << 16 | dsp_ar[3];
+        uint32_t cnt = ((uint32_t)(dsp_ar[4] & 0x7FFF) << 16 | dsp_ar[5]) & ~31u;
+        bool to_main = dsp_ar[4] & 0x8000;
+        const uint32_t mask = (uint32_t)aram.size() - 1;
+        for (uint32_t i = 0; i < cnt && mm + i < 0x01800000u; ++i) {
+            uint8_t* m = host(virt(mm + i));
+            uint8_t& a = aram[(ar + i) & mask];
+            if (to_main) *m = a; else a = *m;
+        }
+        dsp_ar[4] &= 0x8000;
+        dsp_ar[5] = 0;
+        ar_busy = true;
+        ar_done = std::chrono::steady_clock::now() + std::chrono::nanoseconds((cnt / 32 + 1) * 506);
+        dsp_cr |= DSP_DMA;
+        return;
+    }
     dsp_cr |= DSP_ARINT;
 }
 // AI DMA (DSP registers 0x30-0x3A): the audio output. Each block of
@@ -274,6 +313,8 @@ uint16_t dsp_read(uint32_t off) {
         return lo;
     }
     case 0x0A: return dsp_cr;
+    case 0x16:                                       // AR_MODE: bit 0, the ARAM controller is ready
+        return (uint16_t)(store_read(0xCC005016, 2) | (aram.empty() ? 0 : 1));
     case 0x3A: return ai_dma_blocks_left();
     }
     if (off >= 0x20 && off < 0x30) return dsp_ar[(off - 0x20) / 2];
@@ -305,7 +346,7 @@ uint32_t ai_count_base = 0;                           // AICR (ai_cr) is with th
 uint64_t ai_start_tb = 0;
 uint32_t ai_samples() {
     if (!(ai_cr & 1)) return ai_count_base;
-    return ai_count_base + (uint32_t)((os_tb_now() - ai_start_tb) * 48000 / 60750000);
+    return ai_count_base + (uint32_t)((os_tb_now() - ai_start_tb) * 48000 / tb_hz());
 }
 
 // ---- EXI ------------------------------------------------------------------------------------
@@ -432,23 +473,200 @@ void exi_write(uint32_t off, uint32_t v) {
     }
 }
 
+// ---- DI (GameCube) --------------------------------------------------------------------------
+// The GameCube's SDK drives the disc drive itself: a command in DICMDBUF0-2
+// (the command byte on top), a DMA address and length, and DICR's TSTART.
+// A command ends with the transfer interrupt, the data in memory then, after
+// the time a drive takes: 1 ms, and reads at 16 MB/s (faster than the
+// console's drive, about 3 MB/s). Never at once: games set their "busy" flag
+// after DVDReadAsync returns, and a read whose callbacks all ran before that
+// leaves them busy for ever. DISR bits: 1/2 the error interrupt's mask and
+// status, 3/4 the transfer's, 5/6 the break's; DICVR: 0 the cover (open),
+// 1/2 its interrupt's mask and status.
+enum { DI_SR, DI_CVR, DI_CMD0, DI_CMD1, DI_CMD2, DI_MAR, DI_LEN, DI_CR, DI_IMM, DI_CFG, DI_REGS };
+uint32_t di[DI_REGS];
+bool di_busy = false;                                // a command runs until di_done
+std::chrono::steady_clock::time_point di_done;
+bool di_irq() {
+    uint32_t s = di[DI_SR];
+    return ((s & 0x06) == 0x06) || ((s & 0x18) == 0x18) || ((s & 0x60) == 0x60) ||
+           ((di[DI_CVR] & 0x06) == 0x06);
+}
+void di_command() {                                  // TSTART: the command starts
+    uint32_t len = (di[DI_CMD0] >> 24) == 0xA8 ? di[DI_LEN] & ~31u : 0;
+    di_busy = true;
+    di_done = std::chrono::steady_clock::now() + std::chrono::microseconds(1000 + len / 16);
+}
+void di_finish() {                                   // its time has passed: its effect, the interrupt
+    uint32_t cmd = di[DI_CMD0] >> 24;
+    static const char* dbg = std::getenv("WIIKIT_DIDBG");       // =bt: with the guest's call chain
+    if (dbg) {
+        rt_log("di: %08X %08X %08X -> %08X +%X", di[DI_CMD0], di[DI_CMD1], di[DI_CMD2], di[DI_MAR], di[DI_LEN]);
+        if (!std::strcmp(dbg, "bt") && t_ppc) rt_backtrace(*t_ppc, stderr, 10);
+    }
+    uint32_t mar = di[DI_MAR] & 0x01FFFFE0u, len = di[DI_LEN] & ~31u;
+    switch (cmd) {
+    case 0xA8:                                       // read (0xA8000040: the disc id, at 0)
+        if (mar + len > 0x01800000u) { rt_log("di: read past MEM1 to %08X", mar); break; }
+        disc_read((uint64_t)di[DI_CMD1] << 2, host(virt(mar)), len);
+        di[DI_MAR] = mar + len;
+        di[DI_LEN] = 0;
+        break;
+    case 0x12: {                                     // inquiry: the drive's revision, as Dolphin's
+        const uint8_t rev[32] = {0, 0, 0, 2, 0x20, 0x06, 0x05, 0x26, 0x41};
+        uint32_t n = std::min<uint32_t>(len, 32);
+        if (mar + n <= 0x01800000u) std::memcpy(host(virt(mar)), rev, n);
+        di[DI_MAR] = mar + n;
+        di[DI_LEN] = 0;
+        break;
+    }
+    case 0xE0: di[DI_IMM] = 0; break;               // request error: none
+    case 0xE2: di[DI_IMM] = 0; break;               // audio stream status: not playing
+    case 0xAB: case 0xE1: case 0xE3: case 0xE4: break;   // seek, audio stream, stop motor, stream buffer
+    default: rt_log("di: command %08X %08X %08X", di[DI_CMD0], di[DI_CMD1], di[DI_CMD2]); break;
+    }
+    di[DI_CR] &= ~1u;
+    di[DI_SR] |= 0x10;                               // TCINT
+}
+uint32_t di_read(uint32_t off) { return off / 4 < DI_REGS ? di[off / 4] : 0; }
+void di_write(uint32_t off, uint32_t v) {
+    if (off / 4 >= DI_REGS) return;
+    switch (off / 4) {
+    case DI_SR: di[DI_SR] = (v & 0x2B) | (di[DI_SR] & 0x54 & ~v); break;    // interrupts: write 1 to clear
+    case DI_CVR: di[DI_CVR] = (v & 0x02) | (di[DI_CVR] & 0x05 & ~(v & 0x04)); break;
+    case DI_CR: di[DI_CR] = v; if ((v & 1) && !di_busy) di_command(); break;
+    default: di[off / 4] = v; break;
+    }
+}
+
 // ---- SI -------------------------------------------------------------------------------------
-uint32_t si_comcsr = 0, si_sr = 0;
-bool si_irq() { return (si_comcsr & 0x80000000u) && (si_comcsr & 0x40000000u); }
+// Four ports: 0x00 + 12 * port its poll command (OUTBUF), 0x04/0x08 the
+// last poll's answer (INBUFH/L); 0x30 SIPOLL (bits 7..4 enable ports 0..3),
+// 0x34 COMCSR (TCINT 31, its mask 30, COMERR 29, RDSTINT 28, its mask 27;
+// the lengths out 16-22 and in 8-14, 0 meaning 128; the port 1-2; TSTART 0),
+// 0x38 SISR (a byte a port, port 0 on top: NOREP 0x08, RDST 0x20), 0x80 the
+// transfer buffer. A GameCube game finds a standard controller on each port
+// the host has a pad for (video_classic: port 1 is also the keyboard), as
+// Dolphin answers for one: its type, its origin, and its state, read by the
+// poll at each retrace in analog mode 3. The Wii's SDK finds none.
+uint32_t si_comcsr = 0, si_sr = 0, si_poll = 0;
+uint32_t si_out[4], si_in[4][2];
+bool si_irq() {
+    return ((si_comcsr & 0x80000000u) && (si_comcsr & 0x40000000u)) ||
+           ((si_comcsr & 0x10000000u) && (si_comcsr & 0x08000000u));
+}
+// port 1 is also the keyboard: there from the start, before the window has read a pad
+bool si_pad(int port) { return g_gamecube && (port == 0 || video_classic(port).connected); }
+
+// The controller's state: buttons (with USE_ORIGIN), the stick, then in
+// mode 3 the C stick and the triggers. The Classic's buttons as the pad's:
+// + is START, ZL and ZR are Z; L and R press their triggers fully.
+void si_pad_state(int port, uint32_t& hi, uint32_t& lo) {
+    ClassicState s = video_classic(port);
+    static const uint32_t map[][2] = {{0x0010, 0x0100}, {0x0040, 0x0200}, {0x0008, 0x0400}, {0x0020, 0x0800},
+                                      {0x0400, 0x1000}, {0x0004, 0x0010}, {0x0080, 0x0010}, {0x2000, 0x0040},
+                                      {0x0200, 0x0020}, {0x0001, 0x0008}, {0x4000, 0x0004}, {0x0002, 0x0001},
+                                      {0x8000, 0x0002}};
+    uint32_t b = 0x0080;
+    for (auto& m : map)
+        if (s.buttons & m[0]) b |= m[1];
+    auto axis = [](float v) { int a = 0x80 + (int)(v * 100.0f); return (uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a); };
+    auto trig = [](float v) { int a = (int)(v * 255.0f); return (uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a); };
+    hi = b << 16 | axis(s.lx) << 8 | axis(s.ly);
+    lo = axis(s.rx) << 24 | axis(s.ry) << 16 | trig(s.lt) << 8 | trig(s.rt);
+}
+
+// A transfer: the command's first byte in the buffer, the answer written back there
+bool si_dbg = std::getenv("WIIKIT_SIDBG") != nullptr;
+void si_transfer(uint32_t csr) {
+    int port = csr >> 1 & 3;
+    uint32_t in_len = csr >> 8 & 0x7F;
+    if (!in_len) in_len = 128;
+    uint8_t* buf = reg_ptr(0xCD006480);
+    if (si_dbg) rt_log("si: port %d command %02X, %u bytes back%s", port, buf[0], in_len, si_pad(port) ? "" : ", nothing there");
+    if (!si_pad(port)) {
+        si_sr |= 0x08u << (8 * (3 - port));                       // NOREP for that port
+        si_comcsr |= 0x80000000u | 0x20000000u;                   // TCINT, COMERR
+        return;
+    }
+    uint8_t reply[10] = {};
+    uint32_t n = 0;
+    switch (buf[0]) {
+    case 0x00: case 0xFF:                                         // reset, type: a standard controller
+        reply[0] = 0x09; n = 3; break;
+    case 0x41: case 0x42:                                         // origin, recalibrate: centred sticks
+        reply[1] = 0x80; reply[2] = reply[3] = reply[4] = reply[5] = 0x80; n = 10; break;
+    case 0x40: {                                                  // the state, directly
+        uint32_t hi, lo;
+        si_pad_state(port, hi, lo);
+        for (int i = 0; i < 4; ++i) { reply[i] = (uint8_t)(hi >> (24 - 8 * i)); reply[4 + i] = (uint8_t)(lo >> (24 - 8 * i)); }
+        n = 8;
+        break;
+    }
+    default:
+        rt_log("si: command %02X to port %d", buf[0], port);
+        break;
+    }
+    std::memset(buf, 0, std::min<uint32_t>(in_len, 128));
+    std::memcpy(buf, reply, std::min(n, in_len));
+    si_comcsr = (si_comcsr & ~0x20000000u) | 0x80000000u;        // TCINT, no COMERR
+}
+
+// The poll at a retrace: each enabled port's answer, RDST, the interrupt
+void si_poll_ports() {
+    bool any = false;
+    for (int port = 0; port < 4; ++port) {
+        if (!(si_poll & (0x80u >> port))) continue;
+        uint32_t shift = 8 * (3 - port);
+        if (si_pad(port)) {
+            si_pad_state(port, si_in[port][0], si_in[port][1]);
+            si_sr |= 0x20u << shift;                               // RDST
+            any = true;
+        } else {
+            si_in[port][0] = 0x80000000u;                         // ERRSTAT: nothing there
+            si_in[port][1] = 0;
+            si_sr |= 0x08u << shift;                               // NOREP
+        }
+    }
+    if (any) si_comcsr |= 0x10000000u;                            // RDSTINT
+}
+
 uint32_t si_read(uint32_t off) {
+    if (off < 0x30) {
+        int port = off / 12;
+        switch (off % 12) {
+        case 0: return si_out[port];
+        case 4:                                                   // reading INBUFH takes the answer
+            si_sr &= ~(0x20u << (8 * (3 - port)));
+            if (!(si_sr & 0x20202020u)) si_comcsr &= ~0x10000000u;
+            return si_in[port][0];
+        default: return si_in[port][1];
+        }
+    }
+    if (off == 0x30) return si_poll;
     if (off == 0x34) return si_comcsr;
     if (off == 0x38) return si_sr;
     return store_read(0xCD006400 + off, 4);
 }
 void si_write(uint32_t off, uint32_t v) {
-    if (off == 0x34) {
-        uint32_t keep = si_comcsr & 0x80000000u & ~v;            // TCINT: write 1 to clear
-        si_comcsr = (v & ~0x80000001u) | keep;
-        if (v & 1) {                                              // TSTART: no device answers
-            int ch = v >> 1 & 3;
-            si_sr |= 0x08u << (8 * (3 - ch));                     // NOREP for that channel
-            si_comcsr |= 0x80000000u | 0x20000000u;               // TCINT, COMERR
+    if (off < 0x30) {
+        if (off % 12 == 0) {
+            int port = off / 12;
+            if (g_gamecube && (si_out[port] & 3) != (v & 3)) video_set_rumble(port, (v & 3) == 1);
+            si_out[port] = v;
         }
+        return;
+    }
+    if (off == 0x30) {
+        if (si_dbg && v != si_poll) rt_log("si: poll %08X", v);
+        si_poll = v;
+        return;
+    }
+    if (off == 0x34) {
+        // TCINT, RDSTINT: write 1 to clear; COMERR is the last transfer's, read only
+        uint32_t keep = (si_comcsr & 0x90000000u & ~v) | (si_comcsr & 0x20000000u);
+        si_comcsr = (v & ~0xB0000001u) | keep;
+        if (v & 1) si_transfer(v);
         return;
     }
     if (off == 0x38) { si_sr &= ~(v & 0x0F0F0F0Fu); return; }    // error bits: write 1 to clear
@@ -485,6 +703,7 @@ uint32_t pi_cause() {
     if (dsp_irq()) c |= PI_DSP;
     if (exi_irq()) c |= PI_EXI;
     if (si_irq()) c |= PI_SI;
+    if (g_gamecube && di_irq()) c |= PI_DI;
     if (ios_irq_flags() & ios_irq_mask()) c |= PI_IPC;
     return c;
 }
@@ -528,6 +747,7 @@ uint32_t mmio_read(uint32_t a, int size) {
         if (size == 2) return w >> (16 - 8 * (off & 2)) & 0xFFFF;
         return w >> (24 - 8 * (off & 3)) & 0xFF;
     }
+    if (g_gamecube && off >= 0x6000 && off < 0x6040) return di_read(off - 0x6000);
     if (off >= 0x6400 && off < 0x6500) return si_read(off - 0x6400);
     if (off >= 0x6800 && off < 0x6840) return exi_read(off - 0x6800);
     if (off >= 0x6C00 && off < 0x6C20) {
@@ -565,6 +785,7 @@ void mmio_write(uint32_t a, uint32_t v, int size) {
         os_raise();
         return;
     }
+    if (g_gamecube && off >= 0x6000 && off < 0x6040) { di_write(off - 0x6000, v); os_raise(); return; }
     if (off >= 0x6400 && off < 0x6500) { si_write(off - 0x6400, v); os_raise(); return; }
     if (off >= 0x6800 && off < 0x6840) { exi_write(off - 0x6800, v); os_raise(); return; }
     if (off >= 0x6C00 && off < 0x6C20) {
@@ -618,13 +839,19 @@ void ppc_mmio_write(uint32_t a, uint32_t v, int size) {
     mmio_write(a, v, size);
 }
 
+std::chrono::steady_clock::time_point ar_tick();
+std::chrono::steady_clock::time_point di_tick();
+
 bool hw_external_pending() {
     std::lock_guard<std::recursive_mutex> lk(g_hw);
     ios_tick();
+    ar_tick();
+    di_tick();
     return (pi_cause() & pi_mask & ~PI_RSWST) != 0;
 }
 
 std::chrono::steady_clock::time_point ai_tick();
+std::chrono::steady_clock::time_point ar_tick();
 void ios_idle();
 
 void hw_cpu_idle() {
@@ -635,7 +862,27 @@ void hw_cpu_idle() {
 // the clock thread's device work: IPC replies falling due, AI blocks
 std::chrono::steady_clock::time_point hw_tick() {
     std::lock_guard<std::recursive_mutex> lk(g_hw);
-    return std::min(ios_tick(), ai_tick());
+    return std::min({ios_tick(), ai_tick(), ar_tick(), di_tick()});
+}
+
+std::chrono::steady_clock::time_point di_tick() {    // a disc command's end
+    auto now = HostClock::now();
+    if (!di_busy) return now + std::chrono::milliseconds(100);
+    if (now < di_done) return di_done;
+    di_busy = false;
+    di_finish();
+    os_raise();
+    return now + std::chrono::milliseconds(100);
+}
+
+std::chrono::steady_clock::time_point ar_tick() {    // an ARAM DMA's end: its interrupt
+    auto now = HostClock::now();
+    if (!ar_busy) return now + std::chrono::milliseconds(100);
+    if (now < ar_done) return ar_done;
+    ar_busy = false;
+    dsp_cr = (uint16_t)((dsp_cr & ~DSP_DMA) | DSP_ARINT);
+    os_raise();
+    return now + std::chrono::milliseconds(100);
 }
 
 std::chrono::steady_clock::time_point ai_tick() {
@@ -667,6 +914,10 @@ void hw_vi_retrace() {
     for (int i = 0; i < 4; ++i) {
         uint16_t& hi = vi[0x18 + 2 * i];
         if (hi & 0x1000) { hi |= 0x8000; any = true; }
+    }
+    if (g_gamecube && (si_poll & 0xF0)) {
+        si_poll_ports();
+        any |= si_irq();
     }
     if (any) os_raise();
     video_retrace();
@@ -717,5 +968,6 @@ std::chrono::nanoseconds hw_vi_field_period() {
 
 void hw_init() {
     sram_init();
+    if (g_gamecube) aram.assign(0x01000000, 0);
     vi_frame_tb = os_tb_now();
 }

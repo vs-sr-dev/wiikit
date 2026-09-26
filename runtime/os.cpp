@@ -234,7 +234,8 @@ void hle_leave(PPCContext&) {
 }
 
 // ---- time ------------------------------------------------------------------------------------
-// The time base runs at a quarter of the 243 MHz bus clock: 60.75 MHz.
+// The time base runs at a quarter of the bus clock: 60.75 MHz on the Wii,
+// 40.5 MHz on the GameCube.
 using Clock = std::chrono::steady_clock;
 Clock::time_point g_t0;
 std::atomic<int64_t> g_tb_offset{0};
@@ -334,7 +335,7 @@ void clock_main() {
             if (g_dec_armed) {
                 int64_t ticks = (int64_t)(g_dec_deadline - os_tb_now());
                 if (ticks <= 0) os_raise();
-                else wake = std::min(wake, now + std::chrono::nanoseconds(ticks * 4000 / 243));
+                else wake = std::min(wake, now + std::chrono::nanoseconds(ticks * 4000 / g_bus_mhz));
             }
         }
         clock_sleep(wake);
@@ -390,7 +391,7 @@ LONG WINAPI on_crash(EXCEPTION_POINTERS* ep) {
 // ---- services ----------------------------------------------------------------------------------
 uint64_t os_tb_now() {
     int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - g_t0).count();
-    return (uint64_t)(ns / 4000 * 243 + ns % 4000 * 243 / 4000) + (uint64_t)g_tb_offset.load();
+    return (uint64_t)(ns / 4000 * g_bus_mhz + ns % 4000 * g_bus_mhz / 4000) + (uint64_t)g_tb_offset.load();
 }
 
 uint64_t ppc_timebase() { return os_tb_now(); }

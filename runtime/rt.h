@@ -36,6 +36,15 @@ static inline uint8_t* host(uint32_t guest) {
 }
 std::string guest_cstr(uint32_t addr, size_t max = 256);
 
+// ---- the console ---------------------------------------------------------------------------
+// A GameCube disc (boot.cpp decides, from the disc header's magic) runs on
+// the Wii's older self: no IOS or MEM2, 16 MB of ARAM, the disc drive, the
+// controllers and the memory cards at their registers, and a 162 MHz bus
+// (the Wii's is 243 MHz). The time base counts at a quarter of the bus.
+extern bool g_gamecube;
+extern uint32_t g_bus_mhz;                        // 243 on the Wii, 162 on the GameCube
+static inline uint64_t tb_hz() { return (uint64_t)g_bus_mhz * 250000; }
+
 // ---- the OS layer (os.cpp) --------------------------------------------------------------
 void os_install();                                // hooks, time
 void os_start_main(uint32_t entry);               // run __start on a guest host thread, and return

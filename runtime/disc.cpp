@@ -4,7 +4,9 @@
 // bi2.bin, apploader.img, main.dol, fst.bin) and files/. The partition is
 // rebuilt from them as a map of regions: the system files at their fixed
 // offsets and the DOL and FST where boot.bin puts them, then every file where
-// the FST puts it. Reads anywhere else return zeros.
+// the FST puts it. Reads anywhere else return zeros. A GameCube disc is laid
+// out the same way, as a whole, but its offsets are in bytes where a Wii
+// partition's are shifted right by 2.
 #include "disc.h"
 #include "rt.h"
 #include <algorithm>
@@ -22,6 +24,7 @@ struct Region { uint64_t off, size; std::string path; };
 std::vector<Region> g_regions;
 std::map<std::string, FILE*> g_files;
 std::vector<uint8_t> g_boot, g_fst;
+int g_shift = 2;                                     // offsets in boot.bin and the FST: >> 2 on the Wii
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 
@@ -62,7 +65,7 @@ void walk(const std::string& root) {
         while (i >= stack.back().first) stack.pop_back();
         std::string name = names + (be32(e) & 0xFFFFFF);
         if (e[0]) stack.push_back({be32(e + 8), stack.back().second + name + "/"});
-        else add((uint64_t)be32(e + 4) << 2, root + "/files/" + stack.back().second + name, be32(e + 8));   // opened when read
+        else add((uint64_t)be32(e + 4) << g_shift, root + "/files/" + stack.back().second + name, be32(e + 8));   // opened when read
     }
 }
 
@@ -70,14 +73,16 @@ void walk(const std::string& root) {
 
 bool disc_open(const char* dir) {
     std::string root = dir;
+    g_regions.clear();
     g_boot = slurp(root + "/sys/boot.bin");
     g_fst = slurp(root + "/sys/fst.bin");
     if (g_boot.size() < 0x440 || g_fst.size() < 12) return false;
+    g_shift = disc_is_gamecube() ? 0 : 2;
     add(0, root + "/sys/boot.bin");
     add(0x440, root + "/sys/bi2.bin");
     add(0x2440, root + "/sys/apploader.img");
-    add((uint64_t)be32(&g_boot[0x420]) << 2, root + "/sys/main.dol");
-    add((uint64_t)be32(&g_boot[0x424]) << 2, root + "/sys/fst.bin");
+    add((uint64_t)be32(&g_boot[0x420]) << g_shift, root + "/sys/main.dol");
+    add((uint64_t)be32(&g_boot[0x424]) << g_shift, root + "/sys/fst.bin");
     walk(root);
     std::sort(g_regions.begin(), g_regions.end(), [](const Region& a, const Region& b) { return a.off < b.off; });
     return true;
@@ -110,5 +115,6 @@ size_t disc_read(uint64_t off, void* dst, size_t n) {
 }
 
 const std::vector<uint8_t>& disc_boot() { return g_boot; }
+bool disc_is_gamecube() { return g_boot.size() >= 0x20 && be32(&g_boot[0x1C]) == 0xC2339F3Du; }
 const std::vector<uint8_t>& disc_fst() { return g_fst; }
 size_t disc_regions() { return g_regions.size(); }

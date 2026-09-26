@@ -1,4 +1,4 @@
-// wiiboot — run a recompiled Wii disc game.
+// wiiboot — run a recompiled Wii or GameCube disc game.
 //
 //     wiiboot EXTRACT_DIR [--nand DIR] [--fonts DIR] [--symbols symbols.tsv] [--mmio-log] [--watch SECONDS]
 //                         [--no-video] [--no-audio] [--scale N] [--frames-ahead N] [--dump DIR]
@@ -19,9 +19,13 @@
 // resampling table (dsp_coef.bin) are looked for in EXTRACT_DIR/../fonts:
 // Dolphin's Sys/GC has free ones.
 //
+// A GameCube game has no NAND, SYSCONF, IOS or Remote: --aspect,
+// --language and --input do not apply to it.
+//
 // The game runs on its own threads; the main thread runs the window and the
 // renderer (video.cpp), or with --no-video only waits.
 #include "boot.h"
+#include "disc.h"
 #include "mem.h"
 #include "rt.h"
 #include "video.h"
@@ -93,7 +97,8 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 1 << 16);
     if (!mem_init()) rt_die("cannot reserve the guest address space");
     if (vo.keys.empty()) vo.keys = root + "/../keys.txt";
-    vo.widescreen = sysconf_prepare(nand.c_str(), so);
+    const bool gamecube = disc_open(root.c_str()) && disc_is_gamecube();
+    if (!gamecube) vo.widescreen = sysconf_prepare(nand.c_str(), so);
     uint32_t entry = boot_disc(root.c_str(), g_sysconf_eurgb60);
     video_configure(vo);
     gx_init();
@@ -101,9 +106,9 @@ int main(int argc, char** argv) {
     if (!hw_load_fonts(fonts.c_str())) rt_log("wiiboot: no boot ROM fonts in %s", fonts.c_str());
     if (!ax_load_coefs(fonts.c_str())) rt_log("wiiboot: no dsp_coef.bin in %s: linear resampling", fonts.c_str());
     audio_init(audio);
-    ios_init(root.c_str(), nand.c_str());
+    if (!gamecube) ios_init(root.c_str(), nand.c_str());
     os_install();
-    wpad_install();
+    if (!gamecube) wpad_install();
     rt_game_install();
     if (watch) os_watch(watch);
     if (std::getenv("WIIKIT_PROFILE")) os_profile();
