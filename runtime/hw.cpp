@@ -146,8 +146,8 @@ enum : uint16_t {
 //   AX    the audio mixer. Init mail 0xDCD10000; then each audio frame the
 //         SDK sends 0xBABE0000 | size and a command list address, and AX
 //         yields (0xDCD10002) when done, which lets the SDK's task manager
-//         call the resume callback that prepares the next frame. The lists
-//         are not mixed yet: the frames are silent.
+//         call the resume callback that prepares the next frame. ax.cpp
+//         mixes each list, the Wii's or the GameCube's.
 // Mails the DSP sends to the task manager come with a DSP interrupt.
 enum class Ucode { ROM, INIT, AX };
 uint16_t dsp_cr = DSP_HALT;
@@ -192,9 +192,7 @@ void dsp_receive(uint32_t m) {                       // a mail from the CPU, tak
     case Ucode::AX:
         if (dsp_cmdlist_next) {                      // the command list's address: mix a frame
             dsp_cmdlist_next = false;
-            // The GameCube's AX lists and voices have their own layout, its
-            // samples live in ARAM: not mixed yet, the frames are silent
-            if (!g_gamecube) ax_command_list(m);
+            ax_command_list(m);
             ++dsp_frames;
             dsp_send(0xDCD10002, true);
         } else if ((m >> 16) == 0xBABE) {
@@ -560,9 +558,11 @@ bool si_pad(int port) { return g_gamecube && (port == 0 || video_classic(port).c
 
 // The controller's state: buttons (with USE_ORIGIN), the stick, then in
 // mode 3 the C stick and the triggers. The Classic's buttons as the pad's:
-// + is START, ZL and ZR are Z; L and R press their triggers fully.
+// + is START, ZL and ZR are Z; L and R press their triggers fully. The
+// port's filter sees it first, as a Wii game's Classic.
 void si_pad_state(int port, uint32_t& hi, uint32_t& lo) {
     ClassicState s = video_classic(port);
+    wpad_filter_classic(port, s);
     static const uint32_t map[][2] = {{0x0010, 0x0100}, {0x0040, 0x0200}, {0x0008, 0x0400}, {0x0020, 0x0800},
                                       {0x0400, 0x1000}, {0x0004, 0x0010}, {0x0080, 0x0010}, {0x2000, 0x0040},
                                       {0x0200, 0x0020}, {0x0001, 0x0008}, {0x4000, 0x0004}, {0x0002, 0x0001},
@@ -964,6 +964,10 @@ std::chrono::nanoseconds hw_vi_field_period() {
     std::lock_guard<std::recursive_mutex> lk(g_hw);
     ViTiming t = vi_timing();
     return std::chrono::nanoseconds((int64_t)(t.halflines * (double)t.hlw / t.sample_hz * 1e9));
+}
+
+uint8_t aram_read(uint32_t addr) {
+    return aram.empty() ? 0 : aram[addr & (aram.size() - 1)];
 }
 
 void hw_init() {

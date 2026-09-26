@@ -14,6 +14,13 @@
 // Victorious's AXSetVoice* stores): no per-millisecond update field, the
 // full biquad, 0x140 bytes a PB. Addresses the DSP sees are physical.
 //
+// The GameCube's AX (Dolphin's AXUCode describes it) is the same machine
+// with other numbers: 5 ms frames of 160 samples, each voice run one
+// millisecond at a time with the PB updates the CPU queued for that
+// millisecond, three buses (main, aux A, aux B), a 16-bit mixer control, a
+// signed volume envelope, commands of its own, and samples in ARAM, not in
+// main memory. Its PB is the Wii's from the loop flag to the low-pass.
+//
 // The polyphase coefficients live in the DSP's ROM; Dolphin's free
 // dsp_coef.bin has them (ax_load_coefs). Without it the resampler is linear.
 #include "rt.h"
@@ -25,13 +32,14 @@ namespace {
 
 constexpr int N = 96;                                // samples per frame
 constexpr int NWM = 18;                              // Remote speaker samples per frame (6 kHz)
+constexpr int NGC = 160;                             // samples per frame on the GameCube: 5 ms
 
 int16_t coefs[0x800];
 bool have_coefs = false;
 
-// mixing buffers, in SETUP's order
+// mixing buffers, in SETUP's order (the GameCube has no aux C)
 enum { ML, MR, MS, AL, AR, AS, BL, BR, BS, CL, CR, CS, NMAIN };
-int32_t mix[NMAIN][N];
+int32_t mix[NMAIN][NGC];
 int32_t wm[8][NWM];                                  // Remote 0 main, aux; Remote 1 main, aux; ...
 uint16_t last_main_volume = 0x8000, last_aux_volume[3] = {0x8000, 0x8000, 0x8000};
 uint16_t compressor_pos = 0;
@@ -69,18 +77,33 @@ struct PB {
 void read_pb(uint32_t addr, PB& pb) { for (int i = 0; i < PB_WORDS; ++i) pb.w[i] = ld16(dsp_virt(addr) + 2 * i); }
 void write_pb(uint32_t addr, const PB& pb) { for (int i = 0; i < PB_WORDS; ++i) st16(dsp_virt(addr) + 2 * i, pb.w[i]); }
 
+// the GameCube's PB, where it differs (word offsets)
+enum : int {
+    GC_MIXER_CONTROL = 6, GC_RUNNING = 7, GC_IS_STREAM = 8,
+    GC_MIXER = 9,            // 9 pairs: main L R, aux A L R, aux B L R, then the surrounds: B, main, A
+    GC_UPDATES = 34,         // updates for each of the 5 ms, then the address of (offset, value) pairs
+    GC_DPOP = 41,            // main A B left, main A B right, main A B surround
+    GC_VE = 50, GC_LOOP_COUNTER = 97,
+    GC_PB_WORDS = 98,        // what the micro-code reads and writes back
+};
+
 // ---- the accelerator: sample fetch and decode ------------------------------------------------
 // Addresses count samples of the format: nibbles for ADPCM, bytes for 8-bit,
 // half-words for 16-bit. Reaching the end address raises an "exception"
-// the micro-code answers by looping or by stopping the voice.
+// the micro-code answers by looping or by stopping the voice. The Wii's
+// accelerator reads main memory, the GameCube's ARAM.
 struct Accel {
     PB* pb;
     uint32_t start, end, cur;
     uint16_t format, pred_scale;
     int16_t yn1, yn2, gain;
     bool stopped = false;
+    bool gc;
+    int running, is_stream;
 
-    explicit Accel(PB& p) : pb(&p) {
+    explicit Accel(PB& p, bool gamecube = false)
+        : pb(&p), gc(gamecube), running(gc ? (int)GC_RUNNING : (int)RUNNING),
+          is_stream(gc ? (int)GC_IS_STREAM : (int)IS_STREAM) {
         start = p.u32(LOOP_ADDR) & 0x3FFFFFFF;
         end = p.u32(END_ADDR) & 0x3FFFFFFF;
         cur = p.u32(CUR_ADDR) & 0xBFFFFFFF;
@@ -90,21 +113,23 @@ struct Accel {
         gain = p.s(GAIN);
         pred_scale = p.w[PRED_SCALE] & 0x7F;
     }
+    uint8_t rd8(uint32_t a) const { return gc ? aram_read(a) : ld8(dsp_virt(a)); }
     uint16_t fetch() const {
         switch (format & 3) {
-        case 0: { uint8_t b = ld8(dsp_virt(cur >> 1)); return (cur & 1) ? (b & 0xF) : (b >> 4); }
-        case 1: return ld8(dsp_virt(cur));
-        case 2: return ld16(dsp_virt(cur * 2));
+        case 0: { uint8_t b = rd8(cur >> 1); return (cur & 1) ? (b & 0xF) : (b >> 4); }
+        case 1: return rd8(cur);
+        case 2: return (uint16_t)(rd8(cur * 2) << 8 | rd8(cur * 2 + 1));
         default: return 0;
         }
     }
     void end_reached() {
         if (pb->w[LOOPING]) {
             pred_scale = pb->w[LOOP_PRED_SCALE] & 0x7F;
-            if (pb->w[IS_STREAM] != 1) { yn1 = pb->s(LOOP_YN1); yn2 = pb->s(LOOP_YN2); }
+            if (pb->w[is_stream] != 1) { yn1 = pb->s(LOOP_YN1); yn2 = pb->s(LOOP_YN2); }
+            else if (gc) ++pb->w[GC_LOOP_COUNTER];   // a stream counts its loops
             stopped = false;                         // the micro-code rewrites YN2, which resumes reads
         } else {
-            pb->w[RUNNING] = 0;                      // a one-shot voice is over
+            pb->w[running] = 0;                      // a one-shot voice is over
         }
     }
     int16_t sample() {
@@ -126,7 +151,7 @@ struct Accel {
             if ((end & 0xF) == 0 && cur == end) cur = start + 1;
             else if ((end & 0xF) == 1 && cur == end - 1) cur = start;
             else if ((cur & 15) == 0) {
-                pred_scale = ld8(dsp_virt((cur & ~15u) >> 1)) & 0x7F;
+                pred_scale = rd8((cur & ~15u) >> 1) & 0x7F;
                 cur += 2;
                 step += 2;
             }
@@ -415,6 +440,197 @@ void output_remotes(const uint32_t* addr) {
     wm_last = clamp16(wm[0][NWM - 1]);
 }
 
+// ---- the GameCube --------------------------------------------------------------------------
+// One voice, one frame: five milliseconds of 32 samples. Before each, the
+// updates the CPU queued for that millisecond are written into the PB (the
+// sound library's way to start a note between frames).
+void gc_voice(PB& pb) {
+    uint16_t counts[5];
+    int total = 0;
+    for (int i = 0; i < 5; ++i) total += counts[i] = pb.w[GC_UPDATES + i];
+    uint16_t upd[64] = {};
+    if (total) {
+        uint32_t a = dsp_virt(pb.u32(GC_UPDATES + 5));
+        for (int i = 0; i < 64; ++i) upd[i] = ld16(a + 2 * i);
+    }
+    // the mixer control: main L R S and ramps, aux A L R, ramps, S, S ramp, aux B the same
+    struct Bus { int buf, vol, dpop; uint16_t on, ramp; };
+    static const Bus buses[9] = {
+        {ML, GC_MIXER + 0, GC_DPOP + 0, 0x0001, 0x0008}, {MR, GC_MIXER + 2, GC_DPOP + 3, 0x0002, 0x0008},
+        {MS, GC_MIXER + 14, GC_DPOP + 6, 0x0004, 0x0008},
+        {AL, GC_MIXER + 4, GC_DPOP + 1, 0x0010, 0x0040}, {AR, GC_MIXER + 6, GC_DPOP + 4, 0x0020, 0x0040},
+        {AS, GC_MIXER + 16, GC_DPOP + 7, 0x0080, 0x0100},
+        {BL, GC_MIXER + 8, GC_DPOP + 2, 0x0200, 0x0800}, {BR, GC_MIXER + 10, GC_DPOP + 5, 0x0400, 0x0800},
+        {BS, GC_MIXER + 12, GC_DPOP + 8, 0x1000, 0x2000},
+    };
+    constexpr int MSN = NGC / 5;
+    for (int ms = 0, first = 0; ms < 5; first += counts[ms++]) {
+        for (int i = first; i < first + counts[ms] && i < 32; ++i)
+            if (upd[2 * i] < GC_PB_WORDS) pb.w[upd[2 * i]] = upd[2 * i + 1];
+        if (pb.w[GC_RUNNING] != 1) continue;
+        int16_t s[MSN];
+        Accel acc(pb, true);
+        const int16_t* c = have_coefs ? coefs + (pb.w[COEF_SELECT] & 3) * 0x200 : nullptr;
+        uint32_t pos = resample([&](int) { return acc.sample(); }, s, MSN, &pb.s(SRC_LAST), pb.w[SRC_FRAC],
+                                pb.u32(SRC_RATIO), pb.w[SRC_TYPE], c);
+        pb.w[SRC_FRAC] = (uint16_t)pos;
+        acc.store();
+        for (int i = 0; i < MSN; ++i) {              // the volume envelope, signed on the GameCube
+            s[i] = clamp16(((int32_t)s[i] * pb.s(GC_VE)) >> 15);
+            pb.w[GC_VE] += pb.w[GC_VE + 1];
+        }
+        if (pb.w[LPF]) low_pass(s, MSN, pb, LPF);
+        uint16_t mc = pb.w[GC_MIXER_CONTROL];
+        for (const Bus& b : buses)
+            if (mc & b.on) mix_add(mix[b.buf] + ms * MSN, s, MSN, pb, b.vol, pb.s(b.dpop), mc & b.ramp);
+    }
+}
+
+void gc_pbs(uint32_t addr) {
+    PB pb;
+    for (int guard = 0; addr && guard < 1024; ++guard) {
+        uint32_t a = dsp_virt(addr);
+        for (int i = 0; i < GC_PB_WORDS; ++i) pb.w[i] = ld16(a + 2 * i);
+        if (FILE* f = ax_trace(); f && pb.w[GC_RUNNING] == 1)
+            std::fprintf(f, "%llu %08X cur %08X end %08X loop %08X fmt %04X mc %04X L %04X/%04X R %04X/%04X ve %04X/%04X ratio %08X upd %d%d%d%d%d\n",
+                         (unsigned long long)ax_frame, addr, pb.u32(CUR_ADDR), pb.u32(END_ADDR), pb.u32(LOOP_ADDR), pb.w[FORMAT],
+                         pb.w[GC_MIXER_CONTROL], pb.w[GC_MIXER], pb.w[GC_MIXER + 1], pb.w[GC_MIXER + 2], pb.w[GC_MIXER + 3],
+                         pb.w[GC_VE], pb.w[GC_VE + 1], pb.u32(SRC_RATIO), pb.w[GC_UPDATES], pb.w[GC_UPDATES + 1],
+                         pb.w[GC_UPDATES + 2], pb.w[GC_UPDATES + 3], pb.w[GC_UPDATES + 4]);
+        gc_voice(pb);
+        for (int i = 0; i < GC_PB_WORDS; ++i) st16(a + 2 * i, pb.w[i]);
+        addr = pb.u32(NEXT);
+    }
+}
+
+void gc_upload(uint32_t addr, int first, int count) {    // buffers first.. to main memory, 32-bit
+    for (int k = 0; k < count; ++k) upload(addr + k * 4 * NGC, mix[first + k], NGC);
+}
+void gc_download_add(uint32_t addr, int buf) {
+    uint32_t a = dsp_virt(addr);
+    for (int i = 0; i < NGC; ++i) mix[buf][i] += (int32_t)ld32(a + 4 * i);
+}
+
+void gc_command_list(uint32_t addr) {
+    uint32_t a = dsp_virt(addr);
+    auto next = [&] { uint16_t v = ld16(a); a += 2; return v; };
+    auto next32 = [&] { uint32_t hi = next(); return hi << 16 | next(); };
+    auto once = [](uint16_t cmd) {                   // commands no game here has used yet
+        static bool told[0x20];
+        if (cmd < 0x20 && !told[cmd]) { told[cmd] = true; rt_log("ax: the GameCube's command %02X, untested", cmd); }
+    };
+    uint32_t pbs = 0;
+    for (int guard = 0; guard < 1024; ++guard) {
+        uint16_t cmd = next();
+        switch (cmd) {
+        case 0x00: {                                 // SETUP: nine buffers, a start value and a delta each
+            uint32_t s = dsp_virt(next32());
+            for (int b = ML; b <= BS; ++b, s += 6) {
+                int32_t v = (int32_t)ld32(s);
+                int16_t d = (int16_t)ld16(s + 4);
+                for (int i = 0; i < NGC; ++i) mix[b][i] = v ? v + i * d : 0;
+            }
+            break;
+        }
+        case 0x01: {                                 // download main, aux A, aux B and mix them in with volumes
+            once(cmd);
+            uint32_t s = dsp_virt(next32());
+            uint16_t vol[3] = {next(), next(), next()};
+            for (int k = 0; k < 9; ++k)
+                for (int i = 0; i < NGC; ++i, s += 4)
+                    mix[ML + k][i] += (int32_t)(((int64_t)(int32_t)ld32(s) * vol[k / 3]) >> 15);
+            break;
+        }
+        case 0x02: pbs = next32(); break;            // the PB list's address
+        case 0x03: gc_pbs(pbs); break;               // run it
+        case 0x04: case 0x05: {                      // aux A or B to the CPU's effect, last frame's back to main
+            uint32_t w = next32(), r = next32();
+            int base = cmd == 0x04 ? AL : BL;
+            if (w) gc_upload(w, base, 3);
+            for (int k = 0; k < 3; ++k) gc_download_add(r + k * 4 * NGC, ML + k);
+            break;
+        }
+        case 0x06: gc_upload(next32(), ML, 3); break;   // main L R S to main memory
+        case 0x07: case 0x11: {                      // main L and R (0x11: L inverted) from main memory
+            uint32_t s = dsp_virt(next32());
+            for (int i = 0; i < NGC; ++i) {
+                int32_t v = (int32_t)ld32(s + 4 * i);
+                mix[ML][i] = cmd == 0x11 ? -v : v;
+                mix[MR][i] = v;
+                mix[MS][i] = 0;
+            }
+            break;
+        }
+        case 0x08: once(cmd); a += 20; break;
+        case 0x09: {                                 // aux B's return only
+            uint32_t r = next32();
+            for (int k = 0; k < 3; ++k) gc_download_add(r + k * 4 * NGC, ML + k);
+            break;
+        }
+        case 0x0A: case 0x0B: case 0x0C: break;      // no-ops
+        case 0x0D: {                                 // MORE: the list goes on elsewhere
+            uint32_t m = next32();
+            next();
+            a = dsp_virt(m);
+            break;
+        }
+        case 0x0E: {                                 // OUTPUT: surround as 32-bit, L/R clamped, right then left
+            uint32_t surround = next32(), lr = next32();
+            upload(surround, mix[MS], NGC);
+            uint32_t o = dsp_virt(lr);
+            for (int i = 0; i < NGC; ++i) {
+                st16(o + 4 * i, (uint16_t)clamp16(mix[MR][i]));
+                st16(o + 4 * i + 2, (uint16_t)clamp16(mix[ML][i]));
+            }
+            break;
+        }
+        case 0x0F: ++ax_frame; return;               // END
+        case 0x10: {                                 // aux B L/R out, and back in place of it and into main
+            uint32_t w = next32(), r = next32();
+            gc_upload(w, BL, 2);
+            uint32_t s = dsp_virt(r);
+            for (int k = 0; k < 2; ++k)
+                for (int i = 0; i < NGC; ++i, s += 4) {
+                    int32_t v = (int32_t)ld32(s);
+                    mix[BL + k][i] = v;
+                    mix[ML + k][i] += v;
+                }
+            break;
+        }
+        case 0x12: {                                 // the compressor
+            uint16_t threshold = next(), frames = next();
+            uint32_t table = next32();
+            bool hit = false;
+            for (int i = 0; i < NGC && !hit; ++i)
+                hit = std::abs(mix[ML][i]) > (int)threshold || std::abs(mix[MR][i]) > (int)threshold;
+            uint32_t entry;
+            if (hit) { entry = compressor_pos; compressor_pos = frames; }
+            else if (compressor_pos) { --compressor_pos; entry = 11 + compressor_pos; }
+            else break;
+            uint32_t t = dsp_virt(table) + entry * NGC * 2;
+            for (int i = 0; i < NGC; ++i) {
+                uint16_t k = ld16(t + 2 * i);
+                mix[ML][i] = (int32_t)(((int64_t)mix[ML][i] * k) >> 15);
+                mix[MR][i] = (int32_t)(((int64_t)mix[MR][i] * k) >> 15);
+            }
+            break;
+        }
+        case 0x13: {                                 // aux A L R S and aux B S out; main L R, aux B L R in
+            uint32_t ad[6];
+            for (uint32_t& x : ad) x = next32();
+            gc_upload(ad[0], AL, 3);
+            upload(ad[1], mix[BS], NGC);
+            const int dst[4] = {ML, MR, BL, BR};
+            for (int k = 0; k < 4; ++k) gc_download_add(ad[2 + k], dst[k]);
+            break;
+        }
+        default:
+            rt_log("ax: unknown command %04X in the GameCube's list at %08X", cmd, addr);
+            return;
+        }
+    }
+}
+
 }  // namespace
 
 bool ax_load_coefs(const char* dir) {
@@ -432,6 +648,7 @@ bool ax_load_coefs(const char* dir) {
 
 // One command list (the micro-code's "0xBABE" task): runs to the END command.
 void ax_command_list(uint32_t addr) {
+    if (g_gamecube) return gc_command_list(addr);
     uint32_t a = dsp_virt(addr);
     auto next = [&] { uint16_t v = ld16(a); a += 2; return v; };
     auto next32 = [&] { uint32_t hi = next(); return hi << 16 | next(); };

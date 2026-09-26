@@ -82,7 +82,12 @@ void audio_play(const uint8_t* be_rl, uint32_t frames, uint32_t rate) {
     if (dump) {
         if (!dump_rate) dump_rate = rate;
         std::fwrite(lr.data(), 2, lr.size(), dump);  // little-endian hosts
+        uint32_t before = dump_bytes;
         dump_bytes += (uint32_t)(lr.size() * 2);
+        if (dump_bytes / (dump_rate * 4) != before / (dump_rate * 4)) {  // each second: the runtime
+            wav_header(dump, dump_rate, dump_bytes);                     // quits with _Exit, no atexit
+            std::fflush(dump);
+        }
     }
     if (!stream) return;
     if (rate != stream_rate) {

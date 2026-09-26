@@ -79,14 +79,17 @@ void wpad_set_kpad_status_size(uint32_t size);
 // The game plays with the Classic Controller: each channel's Remote holds
 // one where video.cpp has one (video_classic), and says so to the game's
 // connect and extension callbacks. A port's filter may change what a
-// channel's Classic reports before the game reads it (the mouse on a stick).
+// channel's Classic reports before the game reads it (the mouse on a stick);
+// on the GameCube it filters the controllers on SI, which read the same state.
 struct ClassicState;
 using WpadClassicFilter = void (*)(int chan, ClassicState& s);
 void wpad_set_classic(bool on);
 void wpad_set_classic_filter(WpadClassicFilter f);
+void wpad_filter_classic(int chan, ClassicState& s);  // the port's filter, if it has one
 
 // ---- audio (ax.cpp, audio.cpp) --------------------------------------------------------
 void ax_command_list(uint32_t addr);               // the AX micro-code: mix one frame
+uint8_t aram_read(uint32_t addr);                  // the GameCube's ARAM (hw.cpp), where its AX reads samples
 bool ax_load_coefs(const char* dir);               // dsp_coef.bin: the polyphase resampler's table
 void audio_init(bool enabled);                     // the host's audio device (SDL3); false: none
 // A block the AI DMA starts playing: frames of big-endian 16-bit stereo,

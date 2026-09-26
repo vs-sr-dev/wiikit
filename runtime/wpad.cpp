@@ -275,6 +275,7 @@ void hle_kpad_wpad_status(PPCContext& c) {
 void wpad_set_kpad_status_size(uint32_t size) { kpad_status_size = size; }
 void wpad_set_classic(bool on) { classic_game = on; }
 void wpad_set_classic_filter(WpadClassicFilter f) { classic_filter = f; }
+void wpad_filter_classic(int chan, ClassicState& s) { if (classic_filter) classic_filter(chan, s); }
 
 void wpad_install() {
     auto nop = [](PPCContext&) {};
