@@ -18,6 +18,7 @@ the ports.
 | Port | Game | What it asked of wiikit |
 |---|---|---|
 | [pc-victorious](https://github.com/vs-sr-dev/pc-victorious) | Victorious: Taking the Lead (2012) | everything so far: the disc, the symbolised ELF, the recompiler, the runtime from `__start` to a played, heard, 16:9 game |
+| [pc-dragonquestswords](https://github.com/vs-sr-dev/pc-dragonquestswords) | Dragon Quest Swords: The Masked Queen and the Tower of Mirrors (2007, PAL) | a stripped executable (function discovery, names by signature), RVZ images, the PAL boot and EuRGB60, the locked cache's DMA, thousands of draws a frame, audio under load, the Remote's speaker, swings from mouse drags |
 
 Some pieces were first written for two earlier Wii studies (The Last Story
 and Final Fantasy Crystal Chronicles: The Crystal Bearers): the disc
