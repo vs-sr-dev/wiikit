@@ -7,7 +7,7 @@ recompiled game. The GameCube, the Wii's older self (the same processor,
 GPU and DSP), is served by the same pieces and its own few: its discs, its
 disc drive, ARAM, the controllers on SI.
 
-The same idea as [ps2kit](https://github.com/vs-sr-dev/pc-extermination/tree/main/ps2kit),
+The same idea as [ps2kit](https://github.com/vs-sr-dev/ps2kit),
 for the Wii. Each Wii game has its own engine and formats, but a large part
 of every port is the *same* work: the same disc encryption, executable
 formats, CPU, SDK and GPU. wiikit collects that shared part. It grows
