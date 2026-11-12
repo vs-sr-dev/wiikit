@@ -30,6 +30,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #define WIIKIT_GL_DEFINE(T, n) T n = nullptr;
@@ -129,42 +130,56 @@ bool gl_load() {
     return ok;
 }
 
-GLuint compile(GLenum type, const std::string& src) {
-    GLuint sh = glCreateShader(type);
-    const char* p = src.c_str();
-    glShaderSource(sh, 1, &p, nullptr);
-    glCompileShader(sh);
+// A link in two halves: started, the driver may compile on its own threads
+// (GL_KHR_parallel_shader_compile) while the renderer goes on; finished, it
+// waits for the driver if it has to.
+struct Linking { GLuint p = 0, v = 0, f = 0; };
+
+Linking link_start(const std::string& vs, const std::string& fs) {
+    Linking l;
+    auto shader = [](GLenum type, const std::string& src) {
+        GLuint sh = glCreateShader(type);
+        const char* c = src.c_str();
+        glShaderSource(sh, 1, &c, nullptr);
+        glCompileShader(sh);
+        return sh;
+    };
+    l.v = shader(GL_VERTEX_SHADER, vs);
+    l.f = shader(GL_FRAGMENT_SHADER, fs);
+    l.p = glCreateProgram();
+    glAttachShader(l.p, l.v);
+    glAttachShader(l.p, l.f);
+    glProgramParameteri(l.p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);   // for the shader cache
+    glLinkProgram(l.p);
+    return l;
+}
+
+GLuint link_finish(Linking& l, const std::string& vs, const std::string& fs) {
     GLint ok = 0;
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    for (auto [sh, src] : {std::pair<GLuint, const std::string*>{l.v, &vs}, {l.f, &fs}}) {
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[4096];
+            glGetShaderInfoLog(sh, sizeof log, nullptr, log);
+            rt_log("video: shader does not compile:\n%s\n%s", log, src->c_str());
+        }
+    }
+    glDeleteShader(l.v);
+    glDeleteShader(l.f);
+    glGetProgramiv(l.p, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[4096];
-        glGetShaderInfoLog(sh, sizeof log, nullptr, log);
-        rt_log("video: shader does not compile:\n%s\n%s", log, src.c_str());
-        glDeleteShader(sh);
+        glGetProgramInfoLog(l.p, sizeof log, nullptr, log);
+        rt_log("video: program does not link: %s", log);
+        glDeleteProgram(l.p);
         return 0;
     }
-    return sh;
+    return l.p;
 }
 
 GLuint link(const std::string& vs, const std::string& fs) {
-    GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
-    if (!v || !f) return 0;
-    GLuint p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);   // for the shader cache
-    glLinkProgram(p);
-    glDeleteShader(v);
-    glDeleteShader(f);
-    GLint ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetProgramInfoLog(p, sizeof log, nullptr, log);
-        rt_log("video: program does not link: %s", log);
-        return 0;
-    }
-    return p;
+    Linking l = link_start(vs, fs);
+    return link_finish(l, vs, fs);
 }
 
 // The shader cache: each program linked is kept on disk as the driver's
@@ -385,6 +400,166 @@ void bp_set(uint32_t v) {
     if (reg == 0x52) efb_copy(val);
 }
 
+// ---- the shader list ----------------------------------------------------------------------------
+// A link costs 25-200 ms on a desktop driver (The Last Story: 183 in a
+// quarter of an hour of play, each one a stall where something came into
+// view). The cache keeps them for the next time, but only on that machine and
+// that driver, and a change to the generator (fog) makes them new again. The
+// list keeps what is the game's own: for each program, the registers that
+// shape it (gx_shader_regs), one line of "b00=... x1009=... v=..." in hex.
+// At the start, the list's programs that the cache lacks are generated again
+// with today's generator and linked in the background, the driver compiling
+// on its own threads (GL_KHR_parallel_shader_compile), a few at a time;
+// a draw that needs one before it is ready waits only for what is left.
+struct Warm { std::string vs, fs; uint64_t hash; Linking l; bool started = false; };
+std::unordered_map<std::string, Warm> warming;     // by source: listed, not linked yet
+std::deque<std::string> warm_order;                // sources to start, in the list's order
+std::unordered_set<uint64_t> listed;               // sources (source_hash) already in a list
+int warm_running = 0, warm_total = 0, warm_done = 0;
+Clock::time_point warm_t0;
+
+std::string list_line(const GxShaderReg* r, int n) {
+    std::string line;
+    char buf[24];
+    for (int i = 0; i < n; ++i) {
+        if (r[i].space == 'v') std::snprintf(buf, sizeof buf, "%sv=%X", i ? " " : "", r[i].value);
+        else std::snprintf(buf, sizeof buf, "%s%c%02X=%X", i ? " " : "", r[i].space, r[i].addr, r[i].value);
+        line += buf;
+    }
+    return line;
+}
+
+// the code a list line gives, on registers that are zero but for its own
+bool list_source(const std::string& line, std::string& vs, std::string& fs) {
+    static uint32_t lbp[0x100], lxf[0x1058];
+    std::memset(lbp, 0, sizeof lbp);
+    std::memset(lxf, 0, sizeof lxf);
+    uint8_t vflags = 0;
+    const char* p = line.c_str();
+    int n = 0;
+    while (*p) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        char space = *p++;
+        unsigned addr = 0, value = 0;
+        int used = 0;
+        if (space == 'v' ? std::sscanf(p, "=%x%n", &value, &used) != 1
+                         : std::sscanf(p, "%x=%x%n", &addr, &value, &used) != 2) return false;
+        p += used;
+        if (space == 'b' && addr < 0x100) lbp[addr] = value;
+        else if (space == 'x' && addr >= 0x1000 && addr < 0x1058) lxf[addr] = value;
+        else if (space == 'v') vflags = (uint8_t)value;
+        else return false;
+        ++n;
+    }
+    if (!n) return false;
+    gx_shader_gen(lbp, lxf, vflags, vs, fs);
+    return true;
+}
+
+// a program the game uses for the first time in this run, into the list
+void list_add(uint8_t vflags, const std::string& source, uint64_t hash) {
+    if (opt.shader_list.empty() || !listed.insert(hash).second) return;
+    GxShaderReg r[GX_SHADER_REGS_MAX];
+    std::string line = list_line(r, gx_shader_regs(bp, xf, vflags, r)), vs, fs;
+    // the line must give this code back, or it is no use
+    if (!list_source(line, vs, fs) || vs + '\0' + fs != source) {
+        static bool told = false;
+        if (!told) { told = true; rt_log("video: shader list: a program its registers do not give back (not listed)"); }
+        return;
+    }
+    if (FILE* f = std::fopen(opt.shader_list.c_str(), "ab")) {
+        std::fprintf(f, "%s\n", line.c_str());
+        std::fclose(f);
+    }
+}
+
+void warm_read(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return;
+    std::string text;
+    char buf[65536];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    std::fclose(f);
+    size_t lines = 0, bad = 0, queued = 0;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        ++lines;
+        Warm w;
+        if (!list_source(line, w.vs, w.fs)) { ++bad; continue; }
+        std::string source = w.vs + '\0' + w.fs;
+        w.hash = source_hash(source);
+        if (!listed.insert(w.hash).second) continue;              // in a list already
+        if (std::filesystem::exists(cache_path(w.hash))) continue;  // the cache has it
+        warm_order.push_back(source);
+        warming.emplace(std::move(source), std::move(w));
+        ++queued;
+    }
+    rt_log("video: shader list %s: %zu programs, %zu to link%s", path.c_str(), lines, queued,
+           bad ? (", " + std::to_string(bad) + " lines not understood").c_str() : "");
+}
+
+void warm_start() {
+    if (opt.shader_cache.empty()) return;
+    for (const std::string& path : opt.shader_lists) warm_read(path);
+    if (!opt.shader_list.empty()) warm_read(opt.shader_list);
+    warm_total = (int)warming.size();
+    if (!warm_total) return;
+    bool parallel = SDL_GL_ExtensionSupported("GL_KHR_parallel_shader_compile") ||
+                    SDL_GL_ExtensionSupported("GL_ARB_parallel_shader_compile");
+    if (parallel) {
+        using MaxThreads = void(APIENTRY*)(GLuint);
+        auto max_threads = reinterpret_cast<MaxThreads>(SDL_GL_GetProcAddress("glMaxShaderCompilerThreadsKHR"));
+        if (!max_threads) max_threads = reinterpret_cast<MaxThreads>(SDL_GL_GetProcAddress("glMaxShaderCompilerThreadsARB"));
+        if (max_threads) max_threads(0xFFFFFFFF);            // as many as the driver likes
+    } else {
+        rt_log("video: shader list: the driver cannot link in the background; the programs link when first drawn");
+        warming.clear();
+        warm_order.clear();
+        warm_total = 0;
+        return;
+    }
+    warm_t0 = Clock::now();
+}
+
+// once per turn of the renderer's loop: start a few, finish the ready ones
+void warm_poll() {
+    if (!warm_total) return;
+    constexpr int RUNNING = 16, STARTS = 4;
+    for (int k = 0; k < STARTS && warm_running < RUNNING && !warm_order.empty();) {
+        std::string source = std::move(warm_order.front());
+        warm_order.pop_front();
+        auto w = warming.find(source);
+        if (w == warming.end()) continue;                       // a draw took it
+        w->second.l = link_start(w->second.vs, w->second.fs);
+        w->second.started = true;
+        ++warm_running;
+        ++k;
+    }
+    for (auto w = warming.begin(); w != warming.end();) {
+        if (!w->second.started) { ++w; continue; }
+        GLint done = 0;
+        glGetProgramiv(w->second.l.p, GL_COMPLETION_STATUS_KHR, &done);
+        if (!done) { ++w; continue; }
+        GLuint p = link_finish(w->second.l, w->second.vs, w->second.fs);
+        if (p) save_program(p, w->second.hash);
+        programs_by_source.emplace(w->first, p);                // where the first draw with it looks
+        --warm_running;
+        ++warm_done;
+        w = warming.erase(w);
+    }
+    if (warming.empty()) {
+        rt_log("video: shader list: %d of %d programs linked in the background in %.1f s", warm_done, warm_total,
+               std::chrono::duration<double>(Clock::now() - warm_t0).count());
+        warm_total = 0;
+    }
+}
+
 // ---- draws --------------------------------------------------------------------------------------
 GLuint program_for(uint8_t vflags) {
     std::string key = gx_shader_key(bp, xf, vflags);
@@ -398,9 +573,26 @@ GLuint program_for(uint8_t vflags) {
         return same->second;
     }
     uint64_t hash = source_hash(source);
-    GLuint p = load_program(hash);
-    if (p) ++cnt.cached;
-    else if ((p = link(vs, fs))) { ++cnt.linked; save_program(p, hash); }
+    // WIIKIT_PERF=1: links that hold up the frame (a scene's first sight)
+    static const bool tell = std::getenv("WIIKIT_PERF") != nullptr;
+    auto t0 = Clock::now();
+    GLuint p = 0;
+    const char* how = "linked";
+    if (auto w = warming.find(source); w != warming.end()) {
+        // in the shader list, not linked yet: the draw waits for the rest
+        if (w->second.started) { p = link_finish(w->second.l, vs, fs); how = "waited for (listed)"; --warm_running; }
+        else p = link(vs, fs);
+        warming.erase(w);
+        if (p) { ++cnt.linked; save_program(p, hash); }
+    } else if ((p = load_program(hash))) {
+        ++cnt.cached;
+    } else if ((p = link(vs, fs))) {
+        ++cnt.linked;
+        save_program(p, hash);
+    }
+    double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    if (tell && ms >= 20) rt_log("video: program %llu %s in %.1f ms", (unsigned long long)cnt.programs, how, ms);
+    list_add(vflags, source, hash);
     programs_by_source.emplace(std::move(source), p);
     if (const char* dir = std::getenv("WIIKIT_SHADERDUMP")) {           // debugging: the sources
         std::string path = std::string(dir) + "/prog_" + std::to_string(cnt.programs) + ".glsl";
@@ -1544,6 +1736,7 @@ void video_run(const char* title) {
     }
     rt_log("video: internal resolution x%d (EFB %d x %d)", S, EFB_W * S, EFB_H * S);
     setup();
+    warm_start();
 
     auto t0 = Clock::now(), t_title = t0;
     uint64_t frames_then = 0;
@@ -1617,6 +1810,7 @@ void video_run(const char* title) {
             frames_then = cnt.frames;
             t_title = now;
         }
+        warm_poll();
         bool busy = false;
         for (int k = 0; k < 16; ++k) {
             Chunk c;

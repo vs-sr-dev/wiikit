@@ -37,6 +37,12 @@ static_assert(sizeof(GVtx) == 132, "GVtx layout");
 enum : uint8_t { VC_BP = 1, VC_XF, VC_DRAW, VC_TEXUP, VC_TEXBIND, VC_TEXEFB, VC_FRAME, VC_DRAWDONE };
 enum : uint8_t { VTX_COL0 = 1, VTX_COL1 = 2, VTX_NRM = 4, VTX_NBT = 8 };
 
+// gxshader.cpp: a register that shapes a program's code, masked to the bits
+// the generator reads; space 'b' BP, 'x' XF, 'v' the draw's VTX_* flags
+struct GxShaderReg { char space; uint16_t addr; uint32_t value; };
+constexpr int GX_SHADER_REGS_MAX = 128;
+int gx_shader_regs(const uint32_t* bp, const uint32_t* xf, uint8_t vflags, GxShaderReg* out);
+
 // video.cpp
 bool video_enabled();                       // false with --no-video: the stream is parsed only
 // Takes the record and leaves it empty; waits while the renderer has
@@ -67,6 +73,11 @@ struct VideoOptions {
     int window_w = 0, window_h = 0;          // the window's size; 0 = 720 lines at the screen's shape
     std::string keys;                        // the key file: the Remote's buttons on keys and mouse buttons
     std::string shader_cache;                // a directory for linked programs' binaries; empty = none
+    // The shader list: each program the game has used, as the registers that
+    // shape it (one line each). Those not in the shader cache are linked in
+    // the background as the game starts, before it first draws with them.
+    std::string shader_list;                 // the list this machine's runs add to; empty = none
+    std::vector<std::string> shader_lists;   // lists only read (--shader-list): a port's own
     int input = -1;                          // channel 1's sources, INPUT_MODE_* (windows.h has INPUT_*); -1: the key file's
 };
 enum { INPUT_MODE_AUTO, INPUT_MODE_PAD, INPUT_MODE_KEYBOARD };

@@ -14,6 +14,7 @@
 // fractional bits in texel units, which is what indirect texturing works on.
 #include "video.h"
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 
@@ -404,27 +405,61 @@ std::string fragment_shader(const uint32_t* bp) {
 
 }  // namespace
 
-// The registers that change the generated code.
-std::string gx_shader_key(const uint32_t* bp, const uint32_t* xf, uint8_t vflags) {
-    std::string k;
-    auto add = [&](uint32_t v) { k.append(reinterpret_cast<const char*>(&v), 4); };
+// The registers that change the generated code, each masked to the bits the
+// generator reads: the program's key, and a line of the renderer's shader
+// list, from which the same code is generated again on registers that are
+// zero but for these (video.cpp checks that it is).
+int gx_shader_regs(const uint32_t* bp, const uint32_t* xf, uint8_t vflags, GxShaderReg* out) {
+    int n = 0;
+    auto B = [&](uint32_t a, uint32_t v) { out[n++] = {'b', (uint16_t)a, v}; };
+    auto X = [&](uint32_t a, uint32_t v) { out[n++] = {'x', (uint16_t)a, v}; };
     uint32_t nchan = xf[0x1009] & 3, ntg = xf[0x103F] & 15;
-    add(nchan | ntg << 4 | (xf[0x1012] & 1) << 8 | (uint32_t)(vflags & VTX_COL1) << 9);
-    for (uint32_t j = 0; j < nchan && j < 2; ++j) { add(xf[0x100E + j]); add(xf[0x1010 + j]); }
-    for (uint32_t i = 0; i < ntg && i < 8; ++i) { add(xf[0x1040 + i]); add(xf[0x1050 + i] & 0x100); }
+    X(0x1009, nchan);
+    X(0x103F, ntg);
+    X(0x1012, xf[0x1012] & 1);
+    out[n++] = {'v', 0, (uint32_t)(vflags & VTX_COL1)};
+    for (uint32_t j = 0; j < nchan && j < 2; ++j) { X(0x100E + j, xf[0x100E + j]); X(0x1010 + j, xf[0x1010 + j]); }
+    for (uint32_t i = 0; i < ntg && i < 8; ++i) { X(0x1040 + i, xf[0x1040 + i]); X(0x1050 + i, xf[0x1050 + i] & 0x100); }
     uint32_t gen = bp[0x00], ntev = (gen >> 10 & 15) + 1;
-    add(gen & 0x73C0F);                              // texgens, TEV and indirect stages
-    for (uint32_t s = 0; s < ntev; ++s) { add(bp[0xC0 + 2 * s]); add(bp[0xC1 + 2 * s]); add(bp[0x10 + s]); }
-    for (uint32_t i = 0; i < (ntev + 1) / 2; ++i) add(bp[0x28 + i]);
-    for (int i = 0; i < 8; ++i) add(bp[0xF6 + i]);
-    add(bp[0xF3] >> 16);
-    add(bp[0x27]);
-    add(bp[0x42] >> 8 & 1);
-    add(bp[0xF1] >> 21 & 7 ? (bp[0xF1] >> 20 & 15) | (bp[0xE8] >> 10 & 1) << 4 : 0);   // fog
+    B(0x00, gen & 0x73C0F);                          // texgens, TEV and indirect stages
+    for (uint32_t s = 0; s < ntev; ++s) {
+        B(0xC0 + 2 * s, bp[0xC0 + 2 * s]);
+        B(0xC1 + 2 * s, bp[0xC1 + 2 * s]);
+        B(0x10 + s, bp[0x10 + s]);
+    }
+    for (uint32_t i = 0; i < (ntev + 1) / 2; ++i) B(0x28 + i, bp[0x28 + i]);
+    for (uint32_t i = 0; i < 8; ++i) B(0xF6 + i, bp[0xF6 + i]);
+    B(0xF3, bp[0xF3] & 0xFFFF0000);
+    B(0x27, bp[0x27]);
+    B(0x42, bp[0x42] & 0x100);
+    if (bp[0xF1] >> 21 & 7) { B(0xF1, bp[0xF1] & 0xF00000); B(0xE8, bp[0xE8] & 0x400); }   // fog
+    else B(0xF1, 0);
+    return n;
+}
+
+std::string gx_shader_key(const uint32_t* bp, const uint32_t* xf, uint8_t vflags) {
+    GxShaderReg r[GX_SHADER_REGS_MAX];
+    int n = gx_shader_regs(bp, xf, vflags, r);
+    std::string k;
+    k.reserve(8 * (size_t)n);
+    for (int i = 0; i < n; ++i) {
+        uint32_t a = (uint32_t)r[i].space << 16 | r[i].addr;
+        k.append(reinterpret_cast<const char*>(&a), 4);
+        k.append(reinterpret_cast<const char*>(&r[i].value), 4);
+    }
     return k;
 }
 
 void gx_shader_gen(const uint32_t* bp, const uint32_t* xf, uint8_t vflags, std::string& vs, std::string& fs) {
     vs = vertex_shader(xf, vflags);
     fs = fragment_shader(bp);
+    // WIIKIT_SHADERSALT=word: a comment in every program, new code to the
+    // driver and to the shader cache (debugging: a first run's links, where
+    // the driver's own cache has seen them all)
+    static const char* salt = std::getenv("WIIKIT_SHADERSALT");
+    if (salt) {
+        std::string c = std::string("// ") + salt + "\n";
+        vs += c;
+        fs += c;
+    }
 }

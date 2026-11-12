@@ -4,7 +4,7 @@
 //                         [--no-video] [--no-audio] [--scale N] [--frames-ahead N] [--dump DIR]
 //                         [--dump-every N] [--quit-after SECONDS] [--aspect 16:9|4:3]
 //                         [--language en|fr|es|de|it|nl|ja] [--fullscreen] [--window WxH] [--keys FILE]
-//                         [--input auto|pad|keyboard]
+//                         [--input auto|pad|keyboard] [--shader-list FILE]...
 //
 // EXTRACT_DIR comes from `python -m wiikit.disc GAME --extract`. The NAND
 // (saves, SYSCONF) is a host folder, EXTRACT_DIR/../nand by default; its
@@ -18,6 +18,11 @@
 // boot ROM's fonts (font_western.bin, font_japanese.bin) and the DSP ROM's
 // resampling table (dsp_coef.bin) are looked for in EXTRACT_DIR/../fonts:
 // Dolphin's Sys/GC has free ones.
+//
+// Linked programs are kept in EXTRACT_DIR/../shadercache; the programs the
+// game has used are listed in EXTRACT_DIR/../shaderlist.txt, and those of
+// that list and of each --shader-list (a port's own, say) that the cache
+// lacks are linked in the background at the start (video.h).
 //
 // A GameCube game has no NAND, SYSCONF, IOS or Remote: --aspect,
 // --language and --input do not apply to it.
@@ -78,6 +83,7 @@ int main(int argc, char** argv) {
             ++i;
         } else if (!std::strcmp(argv[i], "--fullscreen")) vo.fullscreen = true;
         else if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) vo.keys = argv[++i];
+        else if (!std::strcmp(argv[i], "--shader-list") && i + 1 < argc) vo.shader_lists.push_back(argv[++i]);
         else if (!std::strcmp(argv[i], "--input") && i + 1 < argc) {
             std::string m = argv[++i];
             vo.input = m == "auto" ? INPUT_MODE_AUTO : m == "pad" ? INPUT_MODE_PAD : m == "keyboard" ? INPUT_MODE_KEYBOARD : -2;
@@ -98,6 +104,7 @@ int main(int argc, char** argv) {
     if (!mem_init()) rt_die("cannot reserve the guest address space");
     if (vo.keys.empty()) vo.keys = root + "/../keys.txt";
     vo.shader_cache = root + "/../shadercache";
+    vo.shader_list = root + "/../shaderlist.txt";
     const bool gamecube = disc_open(root.c_str()) && disc_is_gamecube();
     if (!gamecube) vo.widescreen = sysconf_prepare(nand.c_str(), so);
     uint32_t entry = boot_disc(root.c_str(), g_sysconf_eurgb60);
